@@ -13,13 +13,24 @@ data_list = []
 st.subheader("① 本日のシグナル判定")
 with st.spinner("データを取得中..."):
     for ticker in tickers:
-        df = yf.Ticker(ticker).history(period="3mo")
+        # yfinanceの最新仕様に完全対応させた取得方法
+        stock = yf.Ticker(ticker)
+        df = stock.history(period="3mo")
+        
         if df.empty or len(df) < 25:
             continue
         
+        # 移動平均の計算
         df['25MA'] = df['Close'].rolling(window=25).mean()
-        latest_close = float(df['Close'].iloc[-1])
-        latest_ma25 = float(df['25MA'].iloc[-1])
+        
+        # 【修正箇所】どんなデータ構造で返ってきても、確実に純粋な「数値」だけを抽出する処理
+        try:
+            # .values[-1] でNumPyの純粋な値を取り出し、float型に変換
+            latest_close = float(df['Close'].dropna().values[-1])
+            latest_ma25 = float(df['25MA'].dropna().values[-1])
+        except Exception:
+            # 万が一エラーになった銘柄はスキップする
+            continue
         
         signal = "★上昇ブレイク" if latest_close > latest_ma25 else "-"
         
@@ -33,23 +44,27 @@ with st.spinner("データを取得中..."):
 if data_list:
     st.dataframe(pd.DataFrame(data_list), use_container_width=True)
 
-# ーーー ここから下が新しく追加したチャート機能 ーーー
 st.subheader("② チャート確認")
-# セレクトボックスで銘柄を選択
 selected_name = st.selectbox("チャートを表示する銘柄を選択してください", [t.replace(".T", "") for t in tickers])
 selected_ticker = selected_name + ".T"
 
-# チャート用の少し長め（半年分）のデータを取得
+# チャート側の取得も修正
 df_chart = yf.Ticker(selected_ticker).history(period="6mo")
-df_chart['25MA'] = df_chart['Close'].rolling(window=25).mean()
+if not df_chart.empty:
+    df_chart['25MA'] = df_chart['Close'].rolling(window=25).mean()
 
-# Plotlyでローソク足と移動平均線を描画
-fig = go.Figure()
-# ローソク足
-fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name='ローソク足'))
-# 25日移動平均線
-fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=2)))
+    fig = go.Figure()
+    # plotlyでローソク足を描画
+    fig.add_trace(go.Candlestick(
+        x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], 
+        low=df_chart['Low'], close=df_chart['Close'], name='ローソク足'
+    ))
+    # 25日線を描画
+    fig.add_trace(go.Scatter(
+        x=df_chart.index, y=df_chart['25MA'], mode='lines', 
+        name='25日線', line=dict(color='orange', width=2)
+    ))
 
-# チャートのレイアウト調整（スマホで見やすくする）
-fig.update_layout(title=f"{selected_name} の日足チャート", xaxis_rangeslider_visible=False, height=500)
-st.plotly_chart(fig, use_container_width=True)
+    # スマホで見やすいようにレイアウト調整
+    fig.update_layout(title=f"{selected_name} の日足チャート", xaxis_rangeslider_visible=False, height=500)
+    st.plotly_chart(fig, use_container_width=True)
