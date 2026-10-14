@@ -2,39 +2,37 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-import urllib.request
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
-# --- 修正箇所1：Wikipediaからの取得エラー（ブロック）対策 ---
-@st.cache_data(ttl=86400)
-def get_nikkei225():
-    url = "https://ja.wikipedia.org/wiki/%E6%97%A5%E7%B5%8C%E5%B9%B3%E5%9D%87%E6%A0%AA%E4%BE%A1%E3%81%AE%E6%A7%8B%E6%88%90%E9%8A%98%E6%9F%84%E4%B8%80%E8%A6%A7"
-    # 普通のブラウザ（Chrome等）からのアクセスに見せかける偽装ヘッダー
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    html = urllib.request.urlopen(req).read()
-    
-    # 取得したHTMLからテーブルを読み込む
-    tables = pd.read_html(html)
-    df = tables[1]
-    return [str(code) + ".T" for code in df['コード']]
+# --- 修正1：エラー対策 ---
+# Wikipediaのブロックを回避するため、日本を代表する主要銘柄をシステムに直接組み込みます。
+MAJOR_STOCKS = [
+    "7203", "8306", "9984", "6758", "6861", "9983", "8035", "4063", "6501", "8316",
+    "7267", "9433", "9432", "8001", "8031", "8058", "6367", "7974", "6098", "4502",
+    "4568", "7741", "4661", "6273", "6902", "8411", "3382", "4503", "6752", "6981",
+    "7269", "6954", "8766", "8053", "8801", "1925", "4519", "7751", "6594", "4901"
+]
+
+# --- 修正2：手動銘柄の保存 ---
+# Session State（セッション状態）を使って、ユーザーの入力を画面更新後も保持します。
+if "manual_tickers" not in st.session_state:
+    st.session_state.manual_tickers = "7203\n8306\n9984\n6758\n6861"
 
 st.sidebar.header("⚙️ 動作モード")
-mode = st.sidebar.radio("モードを選択", ["手動監視モード", "🤖 日経225 自動スクリーニング"])
+mode = st.sidebar.radio("モードを選択", ["手動監視モード", "🤖 主要銘柄 自動スクリーニング"])
 
 tickers = []
 if mode == "手動監視モード":
-    # --- 修正箇所2：スマホで入力しやすい「改行区切り」のテキストエリアに変更 ---
     st.sidebar.write("監視したい銘柄コードを**改行**で入力してください")
-    default_tickers = "7203\n8306\n9984\n6758\n6861"
-    ticker_input = st.sidebar.text_area("銘柄コード (1行に1つ)", default_tickers, height=150)
-    
-    # 改行(\n)で分割してリスト化する
+    # valueに保存された状態をセットし、入力されたら保存し直す
+    ticker_input = st.sidebar.text_area("銘柄コード (1行に1つ)", value=st.session_state.manual_tickers, height=150)
+    st.session_state.manual_tickers = ticker_input
     tickers = [t.strip() + ".T" for t in ticker_input.split('\n') if t.strip()]
 else:
-    st.sidebar.success("日経225の全銘柄から、買いシグナルが出ている株だけを自動で探し出します。")
+    st.sidebar.success("日本を代表する主要銘柄（約40社）から、買いシグナルが出ている株を自動抽出します。エラーなく高速に処理されます。")
     if st.sidebar.button("▶️ スクリーニング開始"):
-        tickers = get_nikkei225()
+        tickers = [t + ".T" for t in MAJOR_STOCKS]
     else:
         st.info("上の「スクリーニング開始」ボタンを押してください。")
 
@@ -49,8 +47,9 @@ if tickers:
     status_text = st.empty()
     
     for i, ticker in enumerate(tickers):
+        code_str = ticker.replace('.T', '')
         progress_bar.progress((i + 1) / len(tickers))
-        status_text.text(f"データ解析中... {i+1}/{len(tickers)} ({ticker.replace('.T', '')})")
+        status_text.text(f"データ解析中... {i+1}/{len(tickers)} ({code_str})")
         
         try:
             stock = yf.Ticker(ticker)
@@ -75,12 +74,20 @@ if tickers:
             else:
                 signal = "様子見"
             
-            if mode == "🤖 日経225 自動スクリーニング":
+            if mode == "🤖 主要銘柄 自動スクリーニング":
                 if signal not in ["🔥 激アツ！買いシグナル", "👍 上昇トレンド"]:
                     continue
             
+            # --- 修正3：銘柄名の取得 ---
+            # 抽出対象になった銘柄のみ「銘柄名」を取得（全銘柄やると重くなるため）
+            try:
+                name = stock.info.get('shortName', code_str)
+            except:
+                name = code_str # 取得失敗時はコードを表示
+                
             data_list.append({
-                "銘柄": ticker.replace(".T", ""),
+                "コード": code_str,
+                "銘柄名": name,
                 "終値": round(latest_close, 1),
                 "5日線": round(latest_5ma, 1),
                 "25日線": round(latest_25ma, 1),
@@ -95,6 +102,12 @@ if tickers:
         df_result = pd.DataFrame(data_list)
         st.write("👇 **表の行をクリック（タップ）すると、下のチャートが切り替わります**")
         
+        # --- 修正4：チャート切り替えの安定化 ---
+        # 選択された銘柄をSession Stateに保存し、確実にチャートに反映させる
+        if "selected_code" not in st.session_state:
+            st.session_state.selected_code = df_result.iloc[0]["コード"]
+            st.session_state.selected_name = df_result.iloc[0]["銘柄名"]
+
         event = st.dataframe(
             df_result, 
             use_container_width=True, 
@@ -102,15 +115,15 @@ if tickers:
             selection_mode="single-row"
         )
         
-        st.subheader("② チャート確認")
-        
         if event.selection.rows:
             selected_index = event.selection.rows[0]
-            selected_name = df_result.iloc[selected_index]["銘柄"]
-        else:
-            selected_name = df_result.iloc[0]["銘柄"]
+            st.session_state.selected_code = df_result.iloc[selected_index]["コード"]
+            st.session_state.selected_name = df_result.iloc[selected_index]["銘柄名"]
             
-        selected_ticker = selected_name + ".T"
+        st.subheader("② チャート確認")
+        
+        display_name = f"{st.session_state.selected_code} {st.session_state.selected_name}"
+        selected_ticker = st.session_state.selected_code + ".T"
 
         df_chart = yf.Ticker(selected_ticker).history(period="6mo")
         if not df_chart.empty:
@@ -122,7 +135,7 @@ if tickers:
             fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['5MA'], mode='lines', name='5日線(短期)', line=dict(color='lime', width=1.5)))
             fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['25MA'], mode='lines', name='25日線(中期)', line=dict(color='orange', width=2)))
 
-            fig.update_layout(title=f"{selected_name} の日足チャート", xaxis_rangeslider_visible=False, height=500, template="plotly_dark")
+            fig.update_layout(title=f"{display_name} の日足チャート", xaxis_rangeslider_visible=False, height=500, template="plotly_dark")
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("現在、強力な買いシグナルが出ている銘柄は見つかりませんでした。")
