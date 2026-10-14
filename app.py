@@ -2,13 +2,20 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
+import urllib.request
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
+# --- 修正箇所1：Wikipediaからの取得エラー（ブロック）対策 ---
 @st.cache_data(ttl=86400)
 def get_nikkei225():
     url = "https://ja.wikipedia.org/wiki/%E6%97%A5%E7%B5%8C%E5%B9%B3%E5%9D%87%E6%A0%AA%E4%BE%A1%E3%81%AE%E6%A7%8B%E6%88%90%E9%8A%98%E6%9F%84%E4%B8%80%E8%A6%A7"
-    tables = pd.read_html(url)
+    # 普通のブラウザ（Chrome等）からのアクセスに見せかける偽装ヘッダー
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    html = urllib.request.urlopen(req).read()
+    
+    # 取得したHTMLからテーブルを読み込む
+    tables = pd.read_html(html)
     df = tables[1]
     return [str(code) + ".T" for code in df['コード']]
 
@@ -17,9 +24,13 @@ mode = st.sidebar.radio("モードを選択", ["手動監視モード", "🤖 �
 
 tickers = []
 if mode == "手動監視モード":
-    st.sidebar.write("監視したい銘柄コードをカンマ区切りで入力")
-    ticker_input = st.sidebar.text_input("銘柄コード", "7203, 8306, 9984, 6758, 6861")
-    tickers = [t.strip() + ".T" for t in ticker_input.split(",") if t.strip()]
+    # --- 修正箇所2：スマホで入力しやすい「改行区切り」のテキストエリアに変更 ---
+    st.sidebar.write("監視したい銘柄コードを**改行**で入力してください")
+    default_tickers = "7203\n8306\n9984\n6758\n6861"
+    ticker_input = st.sidebar.text_area("銘柄コード (1行に1つ)", default_tickers, height=150)
+    
+    # 改行(\n)で分割してリスト化する
+    tickers = [t.strip() + ".T" for t in ticker_input.split('\n') if t.strip()]
 else:
     st.sidebar.success("日経225の全銘柄から、買いシグナルが出ている株だけを自動で探し出します。")
     if st.sidebar.button("▶️ スクリーニング開始"):
@@ -80,12 +91,10 @@ if tickers:
             
     status_text.text("✅ 解析完了！")
     
-    # --- 新機能：表の選択とチャートの連動 ---
     if data_list:
         df_result = pd.DataFrame(data_list)
         st.write("👇 **表の行をクリック（タップ）すると、下のチャートが切り替わります**")
         
-        # on_select機能でユーザーのクリックを検知する
         event = st.dataframe(
             df_result, 
             use_container_width=True, 
@@ -95,18 +104,14 @@ if tickers:
         
         st.subheader("② チャート確認")
         
-        # 表の行が選択されているかチェック
         if event.selection.rows:
-            # 選択された行の銘柄を取得
             selected_index = event.selection.rows[0]
             selected_name = df_result.iloc[selected_index]["銘柄"]
         else:
-            # 何も選択されていない場合は、一番上の銘柄をデフォルト表示
             selected_name = df_result.iloc[0]["銘柄"]
             
         selected_ticker = selected_name + ".T"
 
-        # 選ばれた銘柄のチャートを描画
         df_chart = yf.Ticker(selected_ticker).history(period="6mo")
         if not df_chart.empty:
             df_chart['5MA'] = df_chart['Close'].rolling(window=5).mean()
