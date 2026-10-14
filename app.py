@@ -9,12 +9,7 @@ import re
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
-# ==========================================
-# ⚙️ カスタマイズ設定エリア
-# ==========================================
 MY_STOCKS = ["7974", "4751", "9101", "3990"]
-
-# ② 銘柄名の取得エラー対策：主要銘柄の日本語辞書を内蔵
 MAJOR_NAMES = {
     "7203": "トヨタ自動車", "7267": "ホンダ", "7269": "スズキ", "6902": "デンソー", "7201": "日産自動車", "7270": "SUBARU",
     "6758": "ソニーG", "6861": "キーエンス", "8035": "東京エレクトロン", "6501": "日立製作所", "6981": "村田製作所", "6954": "ファナック",
@@ -30,32 +25,37 @@ MAJOR_STOCKS = list(MAJOR_NAMES.keys())
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + MAJOR_STOCKS))
 
 # ==========================================
-# ① 需給データ（信用残高）取得関数
+# ① 需給データの取得ロジックをさらに強固に修正
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_margin_data(code):
     url = f"https://finance.yahoo.co.jp/quote/{code}.T/margin"
+    # Yahooファイナンスのブロックを避けるための強力なヘッダー
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
     try:
-        html = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3).text
+        html = requests.get(url, headers=headers, timeout=5).text
         soup = BeautifulSoup(html, 'html.parser')
         
-        # ページ内のテキストをすべて取得
+        # 邪魔なスクリプトタグなどを削除してからテキスト化
+        for script in soup(["script", "style"]):
+            script.decompose()
         text = soup.get_text(separator=' ', strip=True)
         
-        # 「信用買残」や「信用売残」の直後にある数字（カンマ付き）を抽出
-        buy_match = re.search(r'信用買残[^\d]*([0-9,]+)', text)
-        sell_match = re.search(r'信用売残[^\d]*([0-9,]+)', text)
+        # 【修正】日付などを誤検知しないよう、後ろに「株」や「倍」がつく数字だけを厳格に狙う
+        buy_match = re.search(r'信用買残.*?([0-9,]+)\s*株', text)
+        sell_match = re.search(r'信用売残.*?([0-9,]+)\s*株', text)
+        ratio_match = re.search(r'(?:貸借|信用)倍率.*?([0-9.,]+)\s*倍', text)
         
-        # カンマを外して数値化（取得できない場合は0にする）
         buy_val = float(buy_match.group(1).replace(',', '')) if buy_match else 0
         sell_val = float(sell_match.group(1).replace(',', '')) if sell_match else 0
         
-        # 信用倍率の計算（買残 ÷ 売残）
-        if sell_val > 0:
-            ratio = round(buy_val / sell_val, 2)
-            ratio_str = f"{ratio}倍"
+        # サイトに倍率が載っていればそれを、なければ自前で計算
+        if ratio_match:
+            ratio_str = ratio_match.group(1) + "倍"
+        elif sell_val > 0:
+            ratio_str = f"{round(buy_val / sell_val, 2)}倍"
         elif buy_val > 0:
-            ratio_str = "売残0 (算定不能)"
+            ratio_str = "売残0"
         else:
             ratio_str = "-"
             
@@ -67,9 +67,6 @@ def get_margin_data(code):
     except Exception:
         return {"買残": "-", "売残": "-", "倍率": "-"}
 
-# ==========================================
-# アプリケーション本体
-# ==========================================
 if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = "7203\n8306\n9984\n6758\n6861"
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
 if "current_mode" not in st.session_state: st.session_state.current_mode = None
@@ -99,7 +96,6 @@ else:
 
 st.title("📈 スイングトレード監視ダッシュボード")
 
-# --- 解析処理 ---
 if run_analysis and tickers_to_analyze:
     st.subheader("① 買いシグナル抽出結果")
     progress_bar = st.progress(0)
@@ -119,7 +115,7 @@ if run_analysis and tickers_to_analyze:
             df['5MA'] = df['Close'].rolling(window=5).mean()
             df['25MA'] = df['Close'].rolling(window=25).mean()
             df['Volume_5MA'] = df['Volume'].rolling(window=5).mean()
-            df['High_60'] = df['High'].rolling(window=60).max() # 過去60日の高値（上値抵抗線）
+            df['High_60'] = df['High'].rolling(window=60).max()
             
             latest_close = float(df['Close'].dropna().values[-1])
             latest_5ma = float(df['5MA'].dropna().values[-1])
@@ -131,16 +127,13 @@ if run_analysis and tickers_to_analyze:
             avg_vol_5 = float(df['Volume_5MA'].dropna().values[-2])
             latest_high_60 = float(df['High_60'].dropna().values[-1])
             
-            # フィルター条件の厳格化
-            distance_to_res = ((latest_high_60 - latest_close) / latest_close) * 100 # 高値までの距離(%)
-            is_vol_surge = latest_vol > (avg_vol_5 * 1.5) # 出来高が平均の1.5倍以上（大商い）
+            distance_to_res = ((latest_high_60 - latest_close) / latest_close) * 100
+            is_vol_surge = latest_vol > (avg_vol_5 * 1.5)
             
-            # RSIとMACD
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
+            df['RSI'] = 100 - (100 / (1 + (gain / loss)))
             latest_rsi = float(df['RSI'].dropna().values[-1])
             
             exp1 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -150,33 +143,23 @@ if run_analysis and tickers_to_analyze:
             latest_macd, prev_macd = float(macd.dropna().values[-1]), float(macd.dropna().values[-2])
             latest_sig, prev_sig = float(signal_line.dropna().values[-1]), float(signal_line.dropna().values[-2])
             
-            # 判定ロジック
             is_gc_ma = (prev_5ma <= prev_25ma) and (latest_5ma > latest_25ma)
             is_gc_macd = (prev_macd <= prev_sig) and (latest_macd > latest_sig)
             is_uptrend = (latest_close > latest_25ma) and (latest_5ma > latest_25ma)
             
             signal_text = "様子見"
-            if is_gc_ma and is_gc_macd:
-                signal_text = "🌟 超激アツ！(Wクロス)"
-            elif is_gc_ma:
-                signal_text = "🔥 買い(MAクロス)"
-            elif is_gc_macd and is_uptrend:
-                signal_text = "🔥 買い(MACD転換)"
-            elif is_uptrend:
-                signal_text = "👍 上昇トレンド"
-            elif latest_close < latest_25ma and latest_rsi < 30:
-                signal_text = "📉 売られすぎ(反発狙い)"
+            if is_gc_ma and is_gc_macd: signal_text = "🌟 超激アツ！(Wクロス)"
+            elif is_gc_ma: signal_text = "🔥 買い(MAクロス)"
+            elif is_gc_macd and is_uptrend: signal_text = "🔥 買い(MACD転換)"
+            elif is_uptrend: signal_text = "👍 上昇トレンド"
+            elif latest_close < latest_25ma and latest_rsi < 30: signal_text = "📉 売られすぎ(反発狙い)"
             
-            # フィルター適用（上値抵抗線と出来高）
             if "買い" in signal_text or "激アツ" in signal_text:
-                if distance_to_res < 3.0: # 抵抗線まで3%未満
-                    signal_text = "⚠️ 買い(上値抵抗線接近)"
-                elif is_vol_surge:
-                    signal_text = signal_text.replace("買い", "買い(大商い)").replace("超激アツ！", "超激アツ！(大商い)")
+                if distance_to_res < 3.0: signal_text = "⚠️ 買い(上値抵抗線接近)"
+                elif is_vol_surge: signal_text = signal_text.replace("買い", "買い(大商い)").replace("超激アツ！", "超激アツ！(大商い)")
 
             if mode == "🤖 注目・主要銘柄 自動スクリーニング":
-                if signal_text == "様子見" or "⚠️" in signal_text:
-                    continue
+                if signal_text == "様子見" or "⚠️" in signal_text: continue
             
             name = MAJOR_NAMES.get(code_str, code_str)
             if name == code_str:
@@ -196,7 +179,6 @@ if run_analysis and tickers_to_analyze:
         st.session_state.selected_code = data_list[0]["コード"]
         st.session_state.selected_name = data_list[0]["銘柄名"]
 
-# --- 画面表示処理 ---
 if st.session_state.analysis_result is not None:
     data_list = st.session_state.analysis_result
     
@@ -215,7 +197,6 @@ if st.session_state.analysis_result is not None:
             
         st.subheader(f"② {st.session_state.selected_code} {st.session_state.selected_name} の詳細分析")
         
-        # ① 需給データ（ピンポイント取得）の表示
         margin_data = get_margin_data(st.session_state.selected_code)
         cols = st.columns(3)
         cols[0].metric(label="信用倍率 (需給バランス)", value=margin_data["倍率"])
@@ -254,20 +235,25 @@ if st.session_state.analysis_result is not None:
             fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
-            # ③ スマホ最適化：凡例（説明）を上に配置し、余白を削る
+            # ==========================================
+            # ② スマホでの操作性（ドラッグ＆ピンチ）の改善設定
+            # ==========================================
             fig.update_layout(
                 xaxis_rangeslider_visible=False, 
                 height=650, 
                 template="plotly_dark",
-                margin=dict(l=10, r=10, t=10, b=10), # スマホ画面用の余白削減
+                dragmode="pan", # 【追加】デフォルトを「範囲選択(Zoom)」から「移動(Pan)」に変更
+                margin=dict(l=10, r=10, t=10, b=10), 
                 legend=dict(
-                    orientation="h", # 水平配置
+                    orientation="h", 
                     yanchor="bottom", 
-                    y=1.02, # チャートの上側に配置
+                    y=1.02, 
                     xanchor="center", 
                     x=0.5
                 )
             )
-            st.plotly_chart(fig, use_container_width=True)
+            
+            # 【追加】config でスクロール（ピンチ）による拡大縮小を有効化
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
     else:
         st.warning("現在、強力な買いシグナルが出ている銘柄は見つかりませんでした。")
