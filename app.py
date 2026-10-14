@@ -38,18 +38,33 @@ def get_margin_data(code):
     try:
         html = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3).text
         soup = BeautifulSoup(html, 'html.parser')
+        
+        # ページ内のテキストをすべて取得
         text = soup.get_text(separator=' ', strip=True)
         
-        buy = re.search(r'信用買残[^\d]*([\d,]+)', text)
-        sell = re.search(r'信用売残[^\d]*([\d,]+)', text)
-        ratio = re.search(r'貸借倍率[^\d]*([\d\.]+)', text) or re.search(r'信用倍率[^\d]*([\d\.]+)', text)
+        # 「信用買残」や「信用売残」の直後にある数字（カンマ付き）を抽出
+        buy_match = re.search(r'信用買残[^\d]*([0-9,]+)', text)
+        sell_match = re.search(r'信用売残[^\d]*([0-9,]+)', text)
         
+        # カンマを外して数値化（取得できない場合は0にする）
+        buy_val = float(buy_match.group(1).replace(',', '')) if buy_match else 0
+        sell_val = float(sell_match.group(1).replace(',', '')) if sell_match else 0
+        
+        # 信用倍率の計算（買残 ÷ 売残）
+        if sell_val > 0:
+            ratio = round(buy_val / sell_val, 2)
+            ratio_str = f"{ratio}倍"
+        elif buy_val > 0:
+            ratio_str = "売残0 (算定不能)"
+        else:
+            ratio_str = "-"
+            
         return {
-            "買残": buy.group(1) if buy else "-",
-            "売残": sell.group(1) if sell else "-",
-            "倍率": ratio.group(1) + "倍" if ratio else "-"
+            "買残": f"{int(buy_val):,}株" if buy_val > 0 else "-",
+            "売残": f"{int(sell_val):,}株" if sell_val > 0 else "-",
+            "倍率": ratio_str
         }
-    except:
+    except Exception:
         return {"買残": "-", "売残": "-", "倍率": "-"}
 
 # ==========================================
