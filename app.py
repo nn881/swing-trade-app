@@ -13,7 +13,7 @@ data_list = []
 st.subheader("① 本日のシグナル判定")
 with st.spinner("データを取得中..."):
     for ticker in tickers:
-        df = yf.download(ticker, period="3mo", progress=False)
+        df = yf.Ticker(ticker).history(period="3mo")
         if df.empty or len(df) < 25:
             continue
         
@@ -40,7 +40,7 @@ selected_name = st.selectbox("チャートを表示する銘柄を選択して�
 selected_ticker = selected_name + ".T"
 
 # チャート用の少し長め（半年分）のデータを取得
-df_chart = yf.download(selected_ticker, period="6mo", progress=False)
+df_chart = yf.Ticker(selected_ticker).history(period="6mo")
 df_chart['25MA'] = df_chart['Close'].rolling(window=25).mean()
 
 # Plotlyでローソク足と移動平均線を描画
