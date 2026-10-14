@@ -197,11 +197,13 @@ if st.session_state.analysis_result is not None:
             
         st.subheader(f"② {st.session_state.selected_code} {st.session_state.selected_name} の詳細分析")
         
-        margin_data = get_margin_data(st.session_state.selected_code)
-        cols = st.columns(3)
-        cols[0].metric(label="信用倍率 (需給バランス)", value=margin_data["倍率"])
-        cols[1].metric(label="信用買残 (将来の売り圧力)", value=margin_data["買残"])
-        cols[2].metric(label="信用売残 (将来の買い圧力)", value=margin_data["売残"])
+        # --- 需給データ確認用の専用ボタンを設置 ---
+        st.info("💡 信用倍率や買残などの需給データは、以下のボタンからYahoo!ファイナンスで正確な最新情報をご確認ください。")
+        yahoo_url = f"https://finance.yahoo.co.jp/quote/{st.session_state.selected_code}.T/margin"
+        st.link_button(f"🔗 {st.session_state.selected_name} の「信用残高・信用倍率」を確認する", yahoo_url, type="primary")
+        
+        selected_ticker = st.session_state.selected_code + ".T"
+        df_chart = yf.Ticker(selected_ticker).history(period="6mo")
         
         selected_ticker = st.session_state.selected_code + ".T"
         df_chart = yf.Ticker(selected_ticker).history(period="6mo")
