@@ -3,76 +3,56 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
-from bs4 import BeautifulSoup
-import re
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
 MY_STOCKS = ["7974", "4751", "9101", "3990"]
+
+# ② 自動抽出の対象銘柄を約150社に大幅増強
 MAJOR_NAMES = {
-    "7203": "トヨタ自動車", "7267": "ホンダ", "7269": "スズキ", "6902": "デンソー", "7201": "日産自動車", "7270": "SUBARU",
-    "6758": "ソニーG", "6861": "キーエンス", "8035": "東京エレクトロン", "6501": "日立製作所", "6981": "村田製作所", "6954": "ファナック",
-    "6594": "ニデック", "6702": "富士通", "6752": "パナソニック", "7741": "HOYA", "7751": "キヤノン", "6146": "ディスコ", "6857": "アドバンテスト", "6920": "レーザーテック",
-    "9984": "ソフトバンクG", "9432": "NTT", "9433": "KDDI", "4307": "野村総研",
-    "8306": "三菱UFJ", "8316": "三井住友", "8411": "みずほ", "8766": "東京海上", "8604": "野村HD", "8750": "第一生命",
-    "8058": "三菱商事", "8031": "三井物産", "8001": "伊藤忠商事", "8053": "住友商事", "8002": "丸紅",
-    "9983": "ファーストリテイリング", "7974": "任天堂", "3382": "セブン＆アイ", "4661": "オリエンタルランド", "6098": "リクルート", "9843": "ニトリ",
-    "4063": "信越化学工業", "4502": "武田薬品工業", "4568": "第一三共", "4519": "中外製薬", "4503": "アステラス製薬", "4523": "エーザイ", "4528": "小野薬品工業", "4911": "資生堂", "4901": "富士フイルム", "4188": "三菱ケミカルG", "3407": "旭化成", "3402": "東レ",
-    "6367": "ダイキン工業", "6273": "SMC", "6301": "コマツ", "8801": "三井不動産", "8802": "三菱地所", "1925": "大和ハウス", "5401": "日本製鉄", "5108": "ブリヂストン", "9022": "JR東海", "9020": "JR東日本", "9104": "商船三井", "9101": "日本郵船"
+    # 食品・飲料
+    "2002": "日清製粉G", "2267": "ヤクルト", "2269": "明治HD", "2282": "日本ハム", "2502": "アサヒG", "2503": "キリンHD", "2801": "キッコーマン", "2802": "味の素", "2914": "JT",
+    # 化学・繊維・トイレタリー
+    "3402": "東レ", "3407": "旭化成", "4005": "住友化学", "4021": "日産化学", "4061": "デンカ", "4063": "信越化学工業", "4183": "三井化学", "4188": "三菱ケミカルG", "4452": "花王", "4901": "富士フイルム", "4911": "資生堂", "8113": "ユニ・チャーム",
+    # 医薬品
+    "4502": "武田薬品工業", "4503": "アステラス製薬", "4507": "塩野義製薬", "4519": "中外製薬", "4523": "エーザイ", "4528": "小野薬品工業", "4568": "第一三共", "4578": "大塚HD",
+    # 石油・鉄鋼・非鉄・素材
+    "5019": "出光興産", "5020": "ENEOS", "5201": "AGC", "5332": "TOTO", "5333": "日本ガイシ", "5401": "日本製鉄", "5411": "JFE", "5713": "住友金属鉱山", "5714": "DOWA", "5802": "住友電工",
+    # 機械・重工
+    "6273": "SMC", "6301": "コマツ", "6326": "クボタ", "6367": "ダイキン工業", "6432": "竹内製作所", "6481": "THK", "7011": "三菱重工", "7012": "川崎重工", "7013": "IHI",
+    # 電機・精密・半導体
+    "6146": "ディスコ", "6501": "日立製作所", "6503": "三菱電機", "6504": "富士電機", "6506": "安川電機", "6594": "ニデック", "6645": "オムロン", "6702": "富士通", "6723": "ルネサス", "6752": "パナソニック", "6758": "ソニーG", "6762": "TDK", "6857": "アドバンテスト", "6861": "キーエンス", "6902": "デンソー", "6920": "レーザーテック", "6954": "ファナック", "6971": "京セラ", "6981": "村田製作所", "7733": "オリンパス", "7741": "HOYA", "7751": "キヤノン", "8035": "東京エレクトロン",
+    # 自動車・輸送機器
+    "7201": "日産自動車", "7202": "いすゞ", "7203": "トヨタ自動車", "7259": "アイシン", "7267": "ホンダ", "7269": "スズキ", "7270": "SUBARU", "7272": "ヤマハ発動機",
+    # 商社・卸売
+    "2768": "双日", "8001": "伊藤忠商事", "8002": "丸紅", "8015": "豊田通商", "8031": "三井物産", "8053": "住友商事", "8058": "三菱商事",
+    # 小売・サービス・IT・通信・ゲーム
+    "3086": "Jフロント", "3092": "ZOZO", "3382": "セブン＆アイ", "3659": "ネクソン", "4307": "野村総研", "4324": "電通G", "4661": "オリエンタルランド", "4704": "トレンドマイクロ", "4751": "サイバーエージェント", "6098": "リクルート", "7532": "パンパシフィック", "7974": "任天堂", "8252": "丸井G", "8267": "イオン", "9432": "NTT", "9433": "KDDI", "9434": "ソフトバンク", "9613": "NTTデータ", "9735": "セコム", "9843": "ニトリ", "9983": "ファーストリテイリング", "9984": "ソフトバンクG",
+    # 金融（銀行・証券・保険・リース）
+    "8306": "三菱UFJ", "8308": "りそな", "8309": "三井住友トラスト", "8316": "三井住友", "8411": "みずほ", "8591": "オリックス", "8604": "野村HD", "8630": "SOMPO", "8725": "MS&AD", "8750": "第一生命", "8766": "東京海上",
+    # 不動産・建設
+    "1801": "大成建設", "1802": "大林組", "1803": "清水建設", "1812": "鹿島", "1925": "大和ハウス", "1928": "積水ハウス", "3289": "東急不動産", "8801": "三井不動産", "8802": "三菱地所", "8804": "東京建物", "8830": "住友不動産",
+    # 電力・ガス・インフラ
+    "9501": "東京電力HD", "9502": "中部電力", "9503": "関西電力", "9531": "東京ガス", "9532": "大阪ガス",
+    # 運輸（鉄道・海運・空運）
+    "9020": "JR東日本", "9021": "JR西日本", "9022": "JR東海", "9101": "日本郵船", "9104": "商船三井", "9107": "川崎汽船", "9143": "SGHD", "9147": "NIPPON EXPRESS", "9201": "JAL", "9202": "ANA",
+    # その他
+    "7911": "TOPPAN", "7912": "大日本印刷", "7936": "アシックス", "7951": "ヤマハ"
 }
 MAJOR_STOCKS = list(MAJOR_NAMES.keys())
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + MAJOR_STOCKS))
-
-# ==========================================
-# ① 需給データの取得ロジックをさらに強固に修正
-# ==========================================
-@st.cache_data(ttl=3600)
-def get_margin_data(code):
-    url = f"https://finance.yahoo.co.jp/quote/{code}.T/margin"
-    # Yahooファイナンスのブロックを避けるための強力なヘッダー
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
-    try:
-        html = requests.get(url, headers=headers, timeout=5).text
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # 邪魔なスクリプトタグなどを削除してからテキスト化
-        for script in soup(["script", "style"]):
-            script.decompose()
-        text = soup.get_text(separator=' ', strip=True)
-        
-        # 【修正】日付などを誤検知しないよう、後ろに「株」や「倍」がつく数字だけを厳格に狙う
-        buy_match = re.search(r'信用買残.*?([0-9,]+)\s*株', text)
-        sell_match = re.search(r'信用売残.*?([0-9,]+)\s*株', text)
-        ratio_match = re.search(r'(?:貸借|信用)倍率.*?([0-9.,]+)\s*倍', text)
-        
-        buy_val = float(buy_match.group(1).replace(',', '')) if buy_match else 0
-        sell_val = float(sell_match.group(1).replace(',', '')) if sell_match else 0
-        
-        # サイトに倍率が載っていればそれを、なければ自前で計算
-        if ratio_match:
-            ratio_str = ratio_match.group(1) + "倍"
-        elif sell_val > 0:
-            ratio_str = f"{round(buy_val / sell_val, 2)}倍"
-        elif buy_val > 0:
-            ratio_str = "売残0"
-        else:
-            ratio_str = "-"
-            
-        return {
-            "買残": f"{int(buy_val):,}株" if buy_val > 0 else "-",
-            "売残": f"{int(sell_val):,}株" if sell_val > 0 else "-",
-            "倍率": ratio_str
-        }
-    except Exception:
-        return {"買残": "-", "売残": "-", "倍率": "-"}
 
 if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = "7203\n8306\n9984\n6758\n6861"
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
 if "current_mode" not in st.session_state: st.session_state.current_mode = None
 
 st.sidebar.header("⚙️ 動作モード")
-mode = st.sidebar.radio("モードを選択", ["手動監視モード", "🤖 注目・主要銘柄 自動スクリーニング"])
+# ① index=1 を指定することで、開いた時に「自動スクリーニング」がデフォルトで選択されるように変更
+mode = st.sidebar.radio(
+    "モードを選択", 
+    ["手動監視モード", "🤖 注目・主要銘柄 自動スクリーニング"], 
+    index=1
+)
 
 if st.session_state.current_mode != mode:
     st.session_state.analysis_result = None
@@ -197,13 +177,9 @@ if st.session_state.analysis_result is not None:
             
         st.subheader(f"② {st.session_state.selected_code} {st.session_state.selected_name} の詳細分析")
         
-        # --- 需給データ確認用の専用ボタンを設置 ---
         st.info("💡 信用倍率や買残などの需給データは、以下のボタンからYahoo!ファイナンスで正確な最新情報をご確認ください。")
         yahoo_url = f"https://finance.yahoo.co.jp/quote/{st.session_state.selected_code}.T/margin"
         st.link_button(f"🔗 {st.session_state.selected_name} の「信用残高・信用倍率」を確認する", yahoo_url, type="primary")
-        
-        selected_ticker = st.session_state.selected_code + ".T"
-        df_chart = yf.Ticker(selected_ticker).history(period="6mo")
         
         selected_ticker = st.session_state.selected_code + ".T"
         df_chart = yf.Ticker(selected_ticker).history(period="6mo")
@@ -237,25 +213,15 @@ if st.session_state.analysis_result is not None:
             fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
-            # ==========================================
-            # ② スマホでの操作性（ドラッグ＆ピンチ）の改善設定
-            # ==========================================
             fig.update_layout(
                 xaxis_rangeslider_visible=False, 
                 height=650, 
                 template="plotly_dark",
-                dragmode="pan", # 【追加】デフォルトを「範囲選択(Zoom)」から「移動(Pan)」に変更
+                dragmode="pan",
                 margin=dict(l=10, r=10, t=10, b=10), 
-                legend=dict(
-                    orientation="h", 
-                    yanchor="bottom", 
-                    y=1.02, 
-                    xanchor="center", 
-                    x=0.5
-                )
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
             )
             
-            # 【追加】config でスクロール（ピンチ）による拡大縮小を有効化
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
     else:
         st.warning("現在、強力な買いシグナルが出ている銘柄は見つかりませんでした。")
