@@ -80,7 +80,6 @@ def check_rights_date_warning():
         return "⚠️ 【権利落ち日 接近アラート】まもなく月末の配当・優待権利落ち日が到来します。権利落ちによる株価の急落リスクにご注意ください。"
     return None
 
-# 【新機能】足種切り替え用のデータ取得関数
 def get_chart_data(code, tf_choice):
     if tf_choice == "週足":
         df = yf.Ticker(code + ".T").history(period="2y", interval="1wk")
@@ -112,11 +111,12 @@ def load_portfolio():
         if '口座区分' in df.columns: df = df.drop(columns=['口座区分'])
         return df
     
+    # 【修正】保有株数を Float 型で初期化する
     return pd.DataFrame({
         "コード": pd.Series(dtype='str'),
         "取得日": pd.Series(dtype='str'),
         "取得単価": pd.Series(dtype='float'),
-        "保有株数": pd.Series(dtype='int'),
+        "保有株数": pd.Series(dtype='float'),
         "メモ (戦略など)": pd.Series(dtype='str')
     })
 
@@ -241,10 +241,8 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        # 【新機能】足種切り替え
         tf_choice = st.radio("チャート表示（足種切り替え）", ["日足", "週足", "月足"], horizontal=True)
         
-        # ATRと目標値の計算用（常に日足ベースで計算する）
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="6mo")
         if not df_daily.empty:
             tr = pd.concat([df_daily['High'] - df_daily['Low'], abs(df_daily['High'] - df_daily['Close'].shift()), abs(df_daily['Low'] - df_daily['Close'].shift())], axis=1).max(axis=1)
@@ -258,7 +256,6 @@ if app_page == "🔍 銘柄スクリーニング":
             col2.metric("🎯 利確目標 (日足基準)", f"¥{take_profit:,.1f}")
             col3.metric("✂️ 損切ライン (日足基準)", f"¥{stop_loss:,.1f}")
             
-            # チャート描画用データの取得
             df_c, ma_s, ma_l, name_s, name_l = get_chart_data(st.session_state.selected_code, tf_choice)
             
             if not df_c.empty:
@@ -279,7 +276,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
                 
-                # スイング目標ライン（月足など長期すぎると見づらくなるため、延長日数を調整）
                 f_days = 20 if tf_choice != "日足" else 5
                 f_date = df_c.index[-1] + timedelta(days=f_days)
                 fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
@@ -303,12 +299,14 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
     st.write("保有しているスイング銘柄を管理します。")
     
+    # 【修正】保有株数の列を NumberColumn に指定し、小数の入力を許可する
     edited_df = st.data_editor(
         st.session_state.portfolio_df, 
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
             "コード": st.column_config.TextColumn("コード (4桁)"),
+            "保有株数": st.column_config.NumberColumn("保有株数", step=0.01, format="%g"),
             "メモ (戦略など)": st.column_config.TextColumn("メモ (戦略など)", max_chars=100)
         }
     )
@@ -343,7 +341,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
-    # 【新機能】ポートフォリオ全体の一括足種切り替え
     port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["日足", "週足", "月足"], horizontal=True)
     
     if st.button("🔄 最新の状況をチェックする", type="primary"):
@@ -360,14 +357,15 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             
             try: entry_price = float(row['取得単価'])
             except: entry_price = 0.0
-            try: shares = int(row['保有株数'])
-            except: shares = 0
+            
+            # 【修正】保有株数を Float 型で受け取るように変更
+            try: shares = float(row['保有株数'])
+            except: shares = 0.0
                 
             name = MAJOR_NAMES.get(code, code)
             st.markdown(f"### {code} {name}")
             
             try:
-                # 損益とSL/TPの計算は常に日足ベースで行う
                 df_daily_p = yf.Ticker(code + ".T").history(period="6mo")
                 if df_daily_p.empty:
                     st.error("データが取得できませんでした。")
@@ -397,10 +395,12 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 c3.metric("🎯 利確目標", f"¥{take_profit:,.1f}")
                 c4.metric("✂️ 損切ライン", f"¥{stop_loss:,.1f}")
                 
+                # 【修正】株数の表示を小数点に対応 ( .g フォーマットで末尾の不要な0を削除 )
+                st.info(f"💰 **評価損益:** ¥{profit_loss_total:,.0f} （保有: {shares:g}株）")
+                
                 if pd.notna(row.get('メモ (戦略など)')) and row.get('メモ (戦略など)'):
                     st.caption(f"📝 メモ: {row.get('メモ (戦略など)')}")
                 
-                # 描画用のチャートデータを取得
                 df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice)
                 
                 if not df_p.empty:
