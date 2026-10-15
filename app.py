@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
+# ==========================================
+# スマホ最適化 CSS
+# ==========================================
 st.markdown("""
     <style>
     @media (max-width: 768px) {
@@ -53,6 +56,9 @@ MAJOR_NAMES = {
 }
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
 
+# ==========================================
+# ユーティリティ・アラート関数
+# ==========================================
 @st.cache_data(ttl=3600)
 def get_earnings_date(code):
     url = f"https://finance.yahoo.co.jp/quote/{code}.T"
@@ -85,6 +91,9 @@ def get_chart_data(code, tf_choice):
         df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
+# ==========================================
+# データの保存・読み込み（永続化機能）
+# ==========================================
 PORTFOLIO_FILE = "portfolio_data.csv"
 TICKERS_FILE = "manual_tickers_data.txt"
 
@@ -101,6 +110,7 @@ def load_portfolio():
         df = pd.read_csv(PORTFOLIO_FILE, dtype={"コード": str})
         if '口座区分' in df.columns: df = df.drop(columns=['口座区分'])
         return df
+    
     return pd.DataFrame({
         "コード": pd.Series(dtype='str'),
         "取得日": pd.Series(dtype='str'),
@@ -117,6 +127,9 @@ if "analysis_result" not in st.session_state: st.session_state.analysis_result =
 if "portfolio_df" not in st.session_state: st.session_state.portfolio_df = load_portfolio()
 if "show_portfolio_charts" not in st.session_state: st.session_state.show_portfolio_charts = False
 
+# ==========================================
+# サイドバー
+# ==========================================
 st.sidebar.header("📁 メニュー")
 app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄スクリーニング", "💼 保有銘柄ポートフォリオ"])
 
@@ -184,7 +197,7 @@ if app_page == "🔍 銘柄スクリーニング":
                 sig = macd.ewm(span=9).mean()
                 
                 # ==================================================
-                # 🛡️ 【新機能】ダマシ回避フィルター：25日線が上向きか横ばい
+                # 🛡️ ダマシ回避フィルター：25日線が上向きか横ばい
                 # ==================================================
                 is_25ma_up = (c_25 >= p_25)
                 
@@ -192,18 +205,50 @@ if app_page == "🔍 銘柄スクリーニング":
                 is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
                 is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
                 
-                sig_txt = "様子見"
-                if is_gc_ma and is_gc_macd: sig_txt = "🌟 超激アツ！(Wクロス)"
-                elif is_gc_ma: sig_txt = "🔥 買い(MAクロス)"
-                elif is_gc_macd and is_uptrend: sig_txt = "🔥 買い(MACD転換)"
-                elif is_uptrend: sig_txt = "👍 上昇トレンド"
-                elif c_c < c_25 and rsi < 30: sig_txt = "📉 売られすぎ(反発狙い)"
+                # ==================================================
+                # 📊 【新機能】総合判定 S・A・B・C ランク付け
+                # ==================================================
+                score = 0
+                base_txt = "シグナル無"
                 
-                if "買い" in sig_txt or "激アツ" in sig_txt:
-                    if dist_res < 3.0: sig_txt = "⚠️ 買い(上値抵抗線接近)"
-                    elif is_vol_surge: sig_txt = sig_txt.replace("買い", "買い(大商い)").replace("超激アツ！", "超激アツ！(大商い)")
+                if is_gc_ma and is_gc_macd:
+                    score = 4
+                    base_txt = "W好転"
+                elif is_gc_ma:
+                    score = 3
+                    base_txt = "MAクロス"
+                elif is_gc_macd and is_uptrend:
+                    score = 3
+                    base_txt = "MACD転換"
+                elif is_uptrend:
+                    score = 2
+                    base_txt = "上昇トレンド"
+                elif c_c < c_25 and rsi < 30:
+                    score = 1
+                    base_txt = "売られすぎ"
+                
+                badge = ""
+                # 買いシグナル(Aランク以上)に対する加点・減点（+α要素）
+                if score >= 3:
+                    if dist_res < 3.0:
+                        score -= 1  # 上値抵抗線が近いので格下げ（高値掴み警戒）
+                        badge = " ⚠️抵抗線接近"
+                    elif is_vol_surge:
+                        score += 1  # 出来高急増は信頼度UPなので格上げ
+                        badge = " 🔥出来高急増"
+                
+                # 最終的なランクテキストの決定
+                if score >= 4: rank_str = "【S】強気買い"
+                elif score == 3: rank_str = "【A】買いシグナル"
+                elif score == 2: rank_str = "【B】順張り"
+                elif score == 1: rank_str = "【特殊】逆張り狙い"
+                else: rank_str = "【C】様子見"
+                
+                sig_txt = f"{rank_str} ({base_txt}){badge}"
 
-                if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (sig_txt == "様子見" or "⚠️" in sig_txt): continue
+                # 自動スクリーニングモードでは、Bランク未満（1, 0）や警告付きは除外する
+                if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (score < 2 or "⚠️" in sig_txt): 
+                    continue
                 
                 name = MAJOR_NAMES.get(code_str, code_str)
                 data_list.append({"コード": code_str, "銘柄名": name, "終値": round(c_c, 1), "上値余地": f"{round(dist_res, 1)}%", "RSI": round(rsi, 1), "判定": sig_txt})
@@ -391,11 +436,11 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice)
                 
                 if not df_p.empty:
-                    df_p['MA_S'] = df_p['Close'].rolling(ma_s).mean() # ←追加：短期線を計算
+                    df_p['MA_S'] = df_p['Close'].rolling(ma_s).mean()
                     df_p['MA_L'] = df_p['Close'].rolling(ma_l).mean()
                     fig_p = go.Figure()
                     fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
-                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1))) # ←追加：緑色で短期線を描画
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)))
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)))
                     
                     if entry_price > 0:
