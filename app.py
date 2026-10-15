@@ -196,18 +196,13 @@ if app_page == "🔍 銘柄スクリーニング":
                 macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
                 sig = macd.ewm(span=9).mean()
                 
-                # ==================================================
-                # 🛡️ ダマシ回避フィルター：25日線が上向きか横ばい
-                # ==================================================
                 is_25ma_up = (c_25 >= p_25)
                 
                 is_gc_ma = (p_5 <= p_25) and (c_5 > c_25) and is_25ma_up
                 is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
                 is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
                 
-                # ==================================================
-                # 📊 【新機能】総合判定 S・A・B・C ランク付け
-                # ==================================================
+                # 総合判定スコア
                 score = 0
                 base_txt = "シグナル無"
                 
@@ -228,25 +223,25 @@ if app_page == "🔍 銘柄スクリーニング":
                     base_txt = "売られすぎ"
                 
                 badge = ""
-                # 買いシグナル(Aランク以上)に対する加点・減点（+α要素）
                 if score >= 3:
                     if dist_res < 3.0:
-                        score -= 1  # 上値抵抗線が近いので格下げ（高値掴み警戒）
+                        score -= 1  
                         badge = " ⚠️抵抗線接近"
                     elif is_vol_surge:
-                        score += 1  # 出来高急増は信頼度UPなので格上げ
+                        score += 1  
                         badge = " 🔥出来高急増"
                 
-                # 最終的なランクテキストの決定
-                if score >= 4: rank_str = "【S】強気買い"
-                elif score == 3: rank_str = "【A】買いシグナル"
-                elif score == 2: rank_str = "【B】順張り"
-                elif score == 1: rank_str = "【特殊】逆張り狙い"
-                else: rank_str = "【C】様子見"
+                score = max(0, min(5, score))
+                
+                # 【修正】星の数を利用したランク表記（昇順ソートでSが一番上に来る魔法の文字列）
+                if score >= 4: rank_str = "★★★★★ 【S】強気買い"
+                elif score == 3: rank_str = "★★★★☆ 【A】買いシグナル"
+                elif score == 2: rank_str = "★★★☆☆ 【B】順張り"
+                elif score == 1: rank_str = "★★☆☆☆ 【特殊】逆張り狙い"
+                else: rank_str = "★☆☆☆☆ 【C】様子見"
                 
                 sig_txt = f"{rank_str} ({base_txt}){badge}"
 
-                # 自動スクリーニングモードでは、Bランク未満（1, 0）や警告付きは除外する
                 if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (score < 2 or "⚠️" in sig_txt): 
                     continue
                 
@@ -260,7 +255,9 @@ if app_page == "🔍 銘柄スクリーニング":
             st.session_state.selected_name = data_list[0]["銘柄名"]
 
     if st.session_state.analysis_result:
-        df_res = pd.DataFrame(st.session_state.analysis_result).sort_values('RSI').reset_index(drop=True)
+        # 【修正】デフォルトの並び順を「判定（星の数）」の昇順（Sがトップ）に設定
+        df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(['判定', 'RSI'], ascending=[True, True]).reset_index(drop=True)
+        
         st.subheader("① 買いシグナル抽出結果")
         event = st.dataframe(df_res, use_container_width=True, on_select="rerun", selection_mode="single-row")
         if event.selection.rows:
