@@ -3,20 +3,17 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import requests
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
-# ==========================================
-# ① スマホ最適化：タイトルのフォントサイズをCSSで調整
-# ==========================================
 st.markdown("""
     <style>
-    /* 画面幅が768px以下（スマホサイズ）の場合のスタイル */
     @media (max-width: 768px) {
-        h1 {
-            font-size: 1.5rem !important; /* タイトルを小さくして1行に収める */
-            padding-bottom: 0px !important;
-        }
+        h1 { font-size: 1.5rem !important; padding-bottom: 0px !important; }
     }
     </style>
 """, unsafe_allow_html=True)
@@ -40,6 +37,31 @@ MAJOR_NAMES = {
 }
 MAJOR_STOCKS = list(MAJOR_NAMES.keys())
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + MAJOR_STOCKS))
+
+# ==========================================
+# 新機能③ 決算日取得関数
+# ==========================================
+@st.cache_data(ttl=3600)
+def get_earnings_date(code):
+    url = f"https://finance.yahoo.co.jp/quote/{code}.T"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        html = requests.get(url, headers=headers, timeout=5).text
+        soup = BeautifulSoup(html, 'html.parser')
+        text = soup.get_text(separator=' ', strip=True)
+        
+        # 決算発表日を抽出（例: "決算発表日 2026/11/05"）
+        match = re.search(r'決算発表日.*?([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})', text)
+        if match:
+            date_str = match.group(1)
+            earnings_date = datetime.strptime(date_str, "%Y/%m/%d")
+            # 現在から7日以内か判定
+            days_left = (earnings_date - datetime.now()).days
+            if 0 <= days_left <= 7:
+                return f"⚠️ 注意：近日中に決算発表が予定されています（{date_str}）"
+        return None
+    except:
+        return None
 
 if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = "7203\n8306\n9984\n6758\n6861"
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
@@ -161,7 +183,7 @@ if st.session_state.analysis_result is not None:
         df_result = df_result.sort_values('RSI', ascending=True).reset_index(drop=True)
         
         st.subheader("① 買いシグナル抽出結果")
-        st.write("👇 **表の行をタップすると、下のチャートと需給データが切り替わります**")
+        st.write("👇 **表の行をタップすると、下のチャートが切り替わります**")
         event = st.dataframe(df_result, use_container_width=True, on_select="rerun", selection_mode="single-row")
         
         if event.selection.rows:
@@ -170,6 +192,11 @@ if st.session_state.analysis_result is not None:
             st.session_state.selected_name = df_result.iloc[selected_index]["銘柄名"]
             
         st.subheader(f"② {st.session_state.selected_code} {st.session_state.selected_name} の詳細分析")
+        
+        # 新機能③：決算日警告の表示
+        warning_msg = get_earnings_date(st.session_state.selected_code)
+        if warning_msg:
+            st.error(warning_msg)
         
         st.info("💡 信用倍率や買残などの需給データは、以下のボタンからYahoo!ファイナンスで正確な最新情報をご確認ください。")
         yahoo_url = f"https://finance.yahoo.co.jp/quote/{st.session_state.selected_code}.T/margin"
@@ -181,6 +208,22 @@ if st.session_state.analysis_result is not None:
         if not df_chart.empty:
             df_chart['5MA'] = df_chart['Close'].rolling(window=5).mean()
             df_chart['25MA'] = df_chart['Close'].rolling(window=25).mean()
+            
+            # 新機能①：ボリンジャーバンド計算
+            df_chart['BB_std'] = df_chart['Close'].rolling(window=25).std()
+            df_chart['BB_upper'] = df_chart['25MA'] + (df_chart['BB_std'] * 2)
+            df_chart['BB_lower'] = df_chart['25MA'] - (df_chart['BB_std'] * 2)
+            
+            # 新機能②：リスク管理（ATRを利用した利確・損切りライン）計算
+            df_chart['High-Low'] = df_chart['High'] - df_chart['Low']
+            df_chart['High-PrevClose'] = abs(df_chart['High'] - df_chart['Close'].shift(1))
+            df_chart['Low-PrevClose'] = abs(df_chart['Low'] - df_chart['Close'].shift(1))
+            df_chart['TR'] = df_chart[['High-Low', 'High-PrevClose', 'Low-PrevClose']].max(axis=1)
+            atr = df_chart['TR'].rolling(window=14).mean().iloc[-1]
+            
+            latest_c = df_chart['Close'].iloc[-1]
+            take_profit = latest_c + (atr * 2) # 利確目標（現在値 + ATR×2）
+            stop_loss = latest_c - (atr * 1.5) # 損切りライン（現在値 - ATR×1.5）
             
             exp1 = df_chart['Close'].ewm(span=12, adjust=False).mean()
             exp2 = df_chart['Close'].ewm(span=26, adjust=False).mean()
@@ -195,10 +238,22 @@ if st.session_state.analysis_result is not None:
 
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
 
+            # ローソク足と移動平均線
             fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name='ローソク足'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['5MA'], mode='lines', name='5日線', line=dict(color='lime', width=1)), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=1.5)), row=1, col=1)
+            
+            # ボリンジャーバンド描画（半透明の帯）
+            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='ボリンジャー±2σ'), row=1, col=1)
+            
+            # リスク管理ライン（最新日から未来方向へ線を引く）
+            last_date = df_chart.index[-1]
+            future_date = last_date + timedelta(days=5) # 5日先まで線を伸ばす
+            fig.add_trace(go.Scatter(x=[last_date, future_date], y=[take_profit, take_profit], mode='lines+text', text=["", "🎯 利確目安"], textposition="top right", name='利確目安', line=dict(color='lightgreen', width=2, dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[last_date, future_date], y=[stop_loss, stop_loss], mode='lines+text', text=["", "✂️ 損切ライン"], textposition="bottom right", name='損切ライン', line=dict(color='red', width=2, dash='dot')), row=1, col=1)
 
+            # MACDとRSI
             fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['MACD_Hist'], name='MACDヒストグラム', marker_color='gray'), row=2, col=1)
             fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MACD'], mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
             fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Signal'], mode='lines', name='シグナル', line=dict(color='magenta', width=1)), row=2, col=1)
@@ -207,20 +262,14 @@ if st.session_state.analysis_result is not None:
             fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
-            # ==========================================
-            # ② スマホ最適化：チャート操作の挙動修正
-            # ==========================================
             fig.update_layout(
                 xaxis_rangeslider_visible=False, 
                 height=650, 
                 template="plotly_dark",
-                # dragmode="pan", ← これを削除し、デフォルトの直感的な挙動に戻す
                 margin=dict(l=10, r=10, t=10, b=10), 
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
             )
             
-            # 【修正】scrollZoomを解除し、スマホのスクロールを妨げないようにする。
-            # また、displayModeBarをFalseにして画面上の邪魔なメニューアイコンを消す。
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
     else:
         st.warning("現在、強力な買いシグナルが出ている銘柄は見つかりませんでした。")
