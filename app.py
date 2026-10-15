@@ -56,9 +56,6 @@ MAJOR_NAMES = {
 }
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
 
-# ==========================================
-# ユーティリティ・アラート関数
-# ==========================================
 @st.cache_data(ttl=3600)
 def get_earnings_date(code):
     url = f"https://finance.yahoo.co.jp/quote/{code}.T"
@@ -96,8 +93,8 @@ def save_tickers(text):
 
 def load_portfolio():
     if os.path.exists(PORTFOLIO_FILE):
-        df = pd.read_csv(PORTFOLIO_FILE)
-        # 過去のデータに口座区分が残っていれば自動で削除する
+        # 【修正】コード列が勝手に数値（Float）になるのを防ぐため、強制的に文字列(str)として読み込む
+        df = pd.read_csv(PORTFOLIO_FILE, dtype={"コード": str})
         if '口座区分' in df.columns:
             df = df.drop(columns=['口座区分'])
         return df
@@ -284,12 +281,13 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
     st.write("保有している特定口座のスイング銘柄を管理します。")
     
-    # 口座区分を削除したエディタ
+    # 【修正】コード列に TextColumn を指定して、入力時に数値化されるのを防ぐ
     edited_df = st.data_editor(
         st.session_state.portfolio_df, 
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
+            "コード": st.column_config.TextColumn("コード (4桁)"),
             "メモ (戦略など)": st.column_config.TextColumn("メモ (戦略など)", max_chars=100)
         }
     )
@@ -297,12 +295,15 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     need_rerun = False
     for index, row in edited_df.iterrows():
         code = str(row.get('コード', '')).strip()
+        # 万が一「1928.0」のように小数点が付いてしまった場合、末尾の「.0」を消去する安全装置
+        if code.endswith('.0'): code = code[:-2]
+            
         date_str = str(row.get('取得日', '')).strip()
         
         try: price = float(row.get('取得単価', 0.0))
         except: price = 0.0
             
-        if code and len(code) >= 4 and date_str and price == 0.0:
+        if code and len(code) >= 4 and code.lower() != 'nan' and date_str and price == 0.0:
             try:
                 date_str = date_str.replace('-', '/')
                 dt = datetime.strptime(date_str, "%Y/%m/%d")
@@ -329,7 +330,10 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
         
         for index, row in edited_df.iterrows():
             code = str(row.get('コード', '')).strip()
-            if not code or str(code) == 'nan': continue
+            # ここでも末尾の「.0」を消去して確実な銘柄コードにする
+            if code.endswith('.0'): code = code[:-2]
+                
+            if not code or code.lower() == 'nan': continue
             
             try: entry_price = float(row['取得単価'])
             except: entry_price = 0.0
