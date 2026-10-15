@@ -56,6 +56,9 @@ MAJOR_NAMES = {
 }
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
 
+# ==========================================
+# ユーティリティ・アラート関数
+# ==========================================
 @st.cache_data(ttl=3600)
 def get_earnings_date(code):
     url = f"https://finance.yahoo.co.jp/quote/{code}.T"
@@ -74,8 +77,20 @@ def get_earnings_date(code):
 def check_rights_date_warning():
     now = datetime.now()
     if 22 <= now.day <= 31:
-        return "⚠️ 【権利落ち日 接近アラート】まもなく月末の配当・優待権利落ち日が到来します。権利落ちによる株価の急落（窓開け下落）リスクにご注意ください。"
+        return "⚠️ 【権利落ち日 接近アラート】まもなく月末の配当・優待権利落ち日が到来します。権利落ちによる株価の急落リスクにご注意ください。"
     return None
+
+# 【新機能】足種切り替え用のデータ取得関数
+def get_chart_data(code, tf_choice):
+    if tf_choice == "週足":
+        df = yf.Ticker(code + ".T").history(period="2y", interval="1wk")
+        return df, 13, 26, "13週線", "26週線"
+    elif tf_choice == "月足":
+        df = yf.Ticker(code + ".T").history(period="5y", interval="1mo")
+        return df, 12, 24, "12ヶ月線", "24ヶ月線"
+    else:
+        df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
+        return df, 5, 25, "5日線", "25日線"
 
 # ==========================================
 # データの保存・読み込み（永続化機能）
@@ -93,10 +108,8 @@ def save_tickers(text):
 
 def load_portfolio():
     if os.path.exists(PORTFOLIO_FILE):
-        # 【修正】コード列が勝手に数値（Float）になるのを防ぐため、強制的に文字列(str)として読み込む
         df = pd.read_csv(PORTFOLIO_FILE, dtype={"コード": str})
-        if '口座区分' in df.columns:
-            df = df.drop(columns=['口座区分'])
+        if '口座区分' in df.columns: df = df.drop(columns=['口座区分'])
         return df
     
     return pd.DataFrame({
@@ -113,6 +126,7 @@ def save_portfolio(df):
 if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = load_tickers()
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
 if "portfolio_df" not in st.session_state: st.session_state.portfolio_df = load_portfolio()
+if "show_portfolio_charts" not in st.session_state: st.session_state.show_portfolio_charts = False
 
 # ==========================================
 # サイドバー
@@ -123,8 +137,7 @@ app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄�
 st.title("📈 スイングトレード監視ダッシュボード")
 
 rights_warning = check_rights_date_warning()
-if rights_warning:
-    st.warning(rights_warning)
+if rights_warning: st.warning(rights_warning)
 
 # ==============================================================================
 # ページ1: 銘柄スクリーニング
@@ -146,8 +159,7 @@ if app_page == "🔍 銘柄スクリーニング":
             save_tickers(ticker_input)
             
         tickers_to_analyze = [t.strip() + ".T" for t in st.session_state.manual_tickers.split('\n') if t.strip()]
-        if tickers_to_analyze:
-            run_analysis = True
+        if tickers_to_analyze: run_analysis = True
     else:
         st.sidebar.success(f"主要銘柄（計{len(TARGET_STOCKS)}社）から自動抽出します。")
         if st.sidebar.button("▶️ スクリーニング開始"):
@@ -229,59 +241,68 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        df_c = yf.Ticker(st.session_state.selected_code + ".T").history(period="6mo")
-        if not df_c.empty:
-            df_c['5MA'] = df_c['Close'].rolling(5).mean()
-            df_c['25MA'] = df_c['Close'].rolling(25).mean()
-            df_c['BB_std'] = df_c['Close'].rolling(25).std()
-            df_c['BB_upper'], df_c['BB_lower'] = df_c['25MA'] + (df_c['BB_std']*2), df_c['25MA'] - (df_c['BB_std']*2)
-            
-            tr = pd.concat([df_c['High'] - df_c['Low'], abs(df_c['High'] - df_c['Close'].shift()), abs(df_c['Low'] - df_c['Close'].shift())], axis=1).max(axis=1)
+        # 【新機能】足種切り替え
+        tf_choice = st.radio("チャート表示（足種切り替え）", ["日足", "週足", "月足"], horizontal=True)
+        
+        # ATRと目標値の計算用（常に日足ベースで計算する）
+        df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="6mo")
+        if not df_daily.empty:
+            tr = pd.concat([df_daily['High'] - df_daily['Low'], abs(df_daily['High'] - df_daily['Close'].shift()), abs(df_daily['Low'] - df_daily['Close'].shift())], axis=1).max(axis=1)
             atr = tr.rolling(14).mean().iloc[-1]
-            latest_price = df_c['Close'].iloc[-1]
+            latest_price = df_daily['Close'].iloc[-1]
             take_profit = latest_price + (atr * 2)
             stop_loss = latest_price - (atr * 1.5)
             
             col1, col2, col3 = st.columns(3)
             col1.metric("現在値 (Entry)", f"¥{latest_price:,.1f}")
-            col2.metric("🎯 利確目標", f"¥{take_profit:,.1f}")
-            col3.metric("✂️ 損切ライン", f"¥{stop_loss:,.1f}")
+            col2.metric("🎯 利確目標 (日足基準)", f"¥{take_profit:,.1f}")
+            col3.metric("✂️ 損切ライン (日足基準)", f"¥{stop_loss:,.1f}")
             
-            macd = df_c['Close'].ewm(span=12).mean() - df_c['Close'].ewm(span=26).mean()
-            sig = macd.ewm(span=9).mean()
-            delta = df_c['Close'].diff()
-            rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / -delta.where(delta < 0, 0).rolling(14).mean())))
-
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
-            fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['5MA'], mode='lines', name='5日線', line=dict(color='lime', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=1.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
+            # チャート描画用データの取得
+            df_c, ma_s, ma_l, name_s, name_l = get_chart_data(st.session_state.selected_code, tf_choice)
             
-            f_date = df_c.index[-1] + timedelta(days=5)
-            fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[stop_loss, stop_loss], mode='lines', name='損切ライン', line=dict(color='red', dash='dot')), row=1, col=1)
+            if not df_c.empty:
+                df_c['MA_S'] = df_c['Close'].rolling(ma_s).mean()
+                df_c['MA_L'] = df_c['Close'].rolling(ma_l).mean()
+                df_c['BB_std'] = df_c['Close'].rolling(ma_l).std()
+                df_c['BB_upper'], df_c['BB_lower'] = df_c['MA_L'] + (df_c['BB_std']*2), df_c['MA_L'] - (df_c['BB_std']*2)
+                
+                macd = df_c['Close'].ewm(span=12).mean() - df_c['Close'].ewm(span=26).mean()
+                sig = macd.ewm(span=9).mean()
+                delta = df_c['Close'].diff()
+                rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / -delta.where(delta < 0, 0).rolling(14).mean())))
 
-            fig.add_trace(go.Bar(x=df_c.index, y=macd-sig, name='MACD Hist', marker_color='gray'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=2, col=1)
+                fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
+                fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
+                
+                # スイング目標ライン（月足など長期すぎると見づらくなるため、延長日数を調整）
+                f_days = 20 if tf_choice != "日足" else 5
+                f_date = df_c.index[-1] + timedelta(days=f_days)
+                fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[stop_loss, stop_loss], mode='lines', name='損切ライン', line=dict(color='red', dash='dot')), row=1, col=1)
 
-            fig.add_trace(go.Scatter(x=df_c.index, y=rsi, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
-            fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+                fig.add_trace(go.Bar(x=df_c.index, y=macd-sig, name='MACD Hist', marker_color='gray'), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=2, col=1)
 
-            fig.update_layout(xaxis_rangeslider_visible=False, height=650, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
+                fig.add_trace(go.Scatter(x=df_c.index, y=rsi, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
+                fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+
+                fig.update_layout(xaxis_rangeslider_visible=False, height=650, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
+                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
 # ==============================================================================
 # ページ2: 保有銘柄ポートフォリオ
 # ==============================================================================
 elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
-    st.write("保有している特定口座のスイング銘柄を管理します。")
+    st.write("保有しているスイング銘柄を管理します。")
     
-    # 【修正】コード列に TextColumn を指定して、入力時に数値化されるのを防ぐ
     edited_df = st.data_editor(
         st.session_state.portfolio_df, 
         num_rows="dynamic", 
@@ -295,11 +316,9 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     need_rerun = False
     for index, row in edited_df.iterrows():
         code = str(row.get('コード', '')).strip()
-        # 万が一「1928.0」のように小数点が付いてしまった場合、末尾の「.0」を消去する安全装置
         if code.endswith('.0'): code = code[:-2]
             
         date_str = str(row.get('取得日', '')).strip()
-        
         try: price = float(row.get('取得単価', 0.0))
         except: price = 0.0
             
@@ -324,15 +343,19 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
+    # 【新機能】ポートフォリオ全体の一括足種切り替え
+    port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["日足", "週足", "月足"], horizontal=True)
+    
     if st.button("🔄 最新の状況をチェックする", type="primary"):
+        st.session_state.show_portfolio_charts = True
+        
+    if st.session_state.show_portfolio_charts:
         total_invested = 0.0
         total_current_value = 0.0
         
         for index, row in edited_df.iterrows():
             code = str(row.get('コード', '')).strip()
-            # ここでも末尾の「.0」を消去して確実な銘柄コードにする
             if code.endswith('.0'): code = code[:-2]
-                
             if not code or code.lower() == 'nan': continue
             
             try: entry_price = float(row['取得単価'])
@@ -344,17 +367,17 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             st.markdown(f"### {code} {name}")
             
             try:
-                df_p = yf.Ticker(code + ".T").history(period="3mo")
-                if df_p.empty:
+                # 損益とSL/TPの計算は常に日足ベースで行う
+                df_daily_p = yf.Ticker(code + ".T").history(period="6mo")
+                if df_daily_p.empty:
                     st.error("データが取得できませんでした。")
                     continue
                 
-                latest_price = df_p['Close'].iloc[-1]
-                
+                latest_price = df_daily_p['Close'].iloc[-1]
                 total_invested += (entry_price * shares)
                 total_current_value += (latest_price * shares)
                 
-                tr = pd.concat([df_p['High'] - df_p['Low'], abs(df_p['High'] - df_p['Close'].shift()), abs(df_p['Low'] - df_p['Close'].shift())], axis=1).max(axis=1)
+                tr = pd.concat([df_daily_p['High'] - df_daily_p['Low'], abs(df_daily_p['High'] - df_daily_p['Close'].shift()), abs(df_daily_p['Low'] - df_daily_p['Close'].shift())], axis=1).max(axis=1)
                 atr = tr.rolling(14).mean().iloc[-1]
                 
                 take_profit = entry_price + (atr * 2) if entry_price > 0 else 0
@@ -377,18 +400,22 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 if pd.notna(row.get('メモ (戦略など)')) and row.get('メモ (戦略など)'):
                     st.caption(f"📝 メモ: {row.get('メモ (戦略など)')}")
                 
-                df_p['25MA'] = df_p['Close'].rolling(25).mean()
-                fig_p = go.Figure()
-                fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
-                fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=1.5)))
+                # 描画用のチャートデータを取得
+                df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice)
                 
-                if entry_price > 0:
-                    fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left")
-                    fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right")
-                    fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right")
+                if not df_p.empty:
+                    df_p['MA_L'] = df_p['Close'].rolling(ma_l).mean()
+                    fig_p = go.Figure()
+                    fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)))
+                    
+                    if entry_price > 0:
+                        fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left")
+                        fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right")
+                        fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right")
 
-                fig_p.update_layout(xaxis_rangeslider_visible=False, height=400, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
+                    fig_p.update_layout(xaxis_rangeslider_visible=False, height=400, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
                 
                 st.markdown("---")
             except Exception as e:
