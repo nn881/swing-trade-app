@@ -26,6 +26,14 @@ st.markdown("""
         text-align: center;
         border: 1px solid rgba(255, 255, 255, 0.1);
     }
+    .total-dash {
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        text-align: center;
+        border: 1px solid #4a90e2;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -48,6 +56,9 @@ MAJOR_NAMES = {
 }
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
 
+# ==========================================
+# ユーティリティ・アラート関数
+# ==========================================
 @st.cache_data(ttl=3600)
 def get_earnings_date(code):
     url = f"https://finance.yahoo.co.jp/quote/{code}.T"
@@ -63,6 +74,12 @@ def get_earnings_date(code):
         return None
     except: return None
 
+def check_rights_date_warning():
+    now = datetime.now()
+    if 22 <= now.day <= 31:
+        return "⚠️ 【権利落ち日 接近アラート】まもなく月末の配当・優待権利落ち日が到来します。権利落ちによる株価の急落（窓開け下落）リスクにご注意ください。"
+    return None
+
 # ==========================================
 # データの保存・読み込み（永続化機能）
 # ==========================================
@@ -71,23 +88,26 @@ TICKERS_FILE = "manual_tickers_data.txt"
 
 def load_tickers():
     if os.path.exists(TICKERS_FILE):
-        with open(TICKERS_FILE, "r", encoding="utf-8") as f:
-            return f.read()
-    return "" # 初期状態は空
+        with open(TICKERS_FILE, "r", encoding="utf-8") as f: return f.read()
+    return ""
 
 def save_tickers(text):
-    with open(TICKERS_FILE, "w", encoding="utf-8") as f:
-        f.write(text)
+    with open(TICKERS_FILE, "w", encoding="utf-8") as f: f.write(text)
 
 def load_portfolio():
     if os.path.exists(PORTFOLIO_FILE):
-        return pd.read_csv(PORTFOLIO_FILE)
-    # 初期状態は空の表（列の枠組みだけ作成）
+        df = pd.read_csv(PORTFOLIO_FILE)
+        # 過去のデータに口座区分が残っていれば自動で削除する
+        if '口座区分' in df.columns:
+            df = df.drop(columns=['口座区分'])
+        return df
+    
     return pd.DataFrame({
         "コード": pd.Series(dtype='str'),
         "取得日": pd.Series(dtype='str'),
         "取得単価": pd.Series(dtype='float'),
-        "保有株数": pd.Series(dtype='int')
+        "保有株数": pd.Series(dtype='int'),
+        "メモ (戦略など)": pd.Series(dtype='str')
     })
 
 def save_portfolio(df):
@@ -105,6 +125,10 @@ app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄�
 
 st.title("📈 スイングトレード監視ダッシュボード")
 
+rights_warning = check_rights_date_warning()
+if rights_warning:
+    st.warning(rights_warning)
+
 # ==============================================================================
 # ページ1: 銘柄スクリーニング
 # ==============================================================================
@@ -120,7 +144,6 @@ if app_page == "🔍 銘柄スクリーニング":
         st.sidebar.write("監視したい銘柄コードを**改行**で入力してください")
         ticker_input = st.sidebar.text_area("銘柄コード", value=st.session_state.manual_tickers, height=150)
         
-        # 入力内容が変更されたら保存する
         if ticker_input != st.session_state.manual_tickers:
             st.session_state.manual_tickers = ticker_input
             save_tickers(ticker_input)
@@ -203,7 +226,11 @@ if app_page == "🔍 銘柄スクリーニング":
         warn = get_earnings_date(st.session_state.selected_code)
         if warn: st.error(warn)
         
-        st.link_button(f"🔗 {st.session_state.selected_name} の「信用残高・信用倍率」を確認する", f"https://finance.yahoo.co.jp/quote/{st.session_state.selected_code}.T/margin", type="primary")
+        col_btn1, col_btn2 = st.columns(2)
+        rakuten_url = f"https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric={st.session_state.selected_code}.t"
+        yahoo_url = f"https://finance.yahoo.co.jp/quote/{st.session_state.selected_code}.T/margin"
+        col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
+        col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
         df_c = yf.Ticker(st.session_state.selected_code + ".T").history(period="6mo")
         if not df_c.empty:
@@ -251,14 +278,21 @@ if app_page == "🔍 銘柄スクリーニング":
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
 # ==============================================================================
-# ページ2: 保 बुन्देल銘柄ポートフォリオ (自動保存機能つき)
+# ページ2: 保有銘柄ポートフォリオ
 # ==============================================================================
 elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
-    st.write("保有している銘柄の情報を入力してください。表は直接編集・行追加が可能です。")
-    st.info("💡 **自動取得機能:** 「コード」と「取得日(YYYY/MM/DD)」を入力し、「取得単価」を **0** にしておくと、システムが自動でその日の株価を取得して入力します。後から手入力で修正することも可能です。")
+    st.write("保有している特定口座のスイング銘柄を管理します。")
     
-    edited_df = st.data_editor(st.session_state.portfolio_df, num_rows="dynamic", use_container_width=True)
+    # 口座区分を削除したエディタ
+    edited_df = st.data_editor(
+        st.session_state.portfolio_df, 
+        num_rows="dynamic", 
+        use_container_width=True,
+        column_config={
+            "メモ (戦略など)": st.column_config.TextColumn("メモ (戦略など)", max_chars=100)
+        }
+    )
     
     need_rerun = False
     for index, row in edited_df.iterrows():
@@ -279,29 +313,30 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     auto_price = df_hist['Close'].iloc[0]
                     edited_df.at[index, '取得単価'] = round(auto_price, 1)
                     need_rerun = True
-            except:
-                pass
+            except: pass
 
-    # テーブルの内容に変更があった場合、ファイルに保存する
     if not edited_df.equals(st.session_state.portfolio_df) or need_rerun:
         st.session_state.portfolio_df = edited_df
         save_portfolio(edited_df)
-        if need_rerun:
-            st.rerun()
+        if need_rerun: st.rerun()
 
+    st.markdown("---")
+    dash_placeholder = st.empty()
+    
     if st.button("🔄 最新の状況をチェックする", type="primary"):
+        total_invested = 0.0
+        total_current_value = 0.0
+        
         for index, row in edited_df.iterrows():
             code = str(row.get('コード', '')).strip()
             if not code or str(code) == 'nan': continue
             
             try: entry_price = float(row['取得単価'])
             except: entry_price = 0.0
-            
             try: shares = int(row['保有株数'])
             except: shares = 0
                 
             name = MAJOR_NAMES.get(code, code)
-            
             st.markdown(f"### {code} {name}")
             
             try:
@@ -310,9 +345,13 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     st.error("データが取得できませんでした。")
                     continue
                 
+                latest_price = df_p['Close'].iloc[-1]
+                
+                total_invested += (entry_price * shares)
+                total_current_value += (latest_price * shares)
+                
                 tr = pd.concat([df_p['High'] - df_p['Low'], abs(df_p['High'] - df_p['Close'].shift()), abs(df_p['Low'] - df_p['Close'].shift())], axis=1).max(axis=1)
                 atr = tr.rolling(14).mean().iloc[-1]
-                latest_price = df_p['Close'].iloc[-1]
                 
                 take_profit = entry_price + (atr * 2) if entry_price > 0 else 0
                 stop_loss = entry_price - (atr * 1.5) if entry_price > 0 else 0
@@ -321,13 +360,18 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 profit_loss_total = profit_loss_per_share * shares
                 pl_color = "normal" if profit_loss_total >= 0 else "inverse"
                 
+                col_btn, _ = st.columns([1, 2])
+                rakuten_port_url = f"https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric={code}.t"
+                col_btn.link_button(f"🛒 {name} を楽天証券で確認・発注", rakuten_port_url, use_container_width=True)
+                
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("取得単価", f"¥{entry_price:,.1f}")
                 c2.metric("現在値", f"¥{latest_price:,.1f}", f"{profit_loss_per_share:,.1f}円", delta_color=pl_color)
                 c3.metric("🎯 利確目標", f"¥{take_profit:,.1f}")
                 c4.metric("✂️ 損切ライン", f"¥{stop_loss:,.1f}")
                 
-                st.info(f"💰 **評価損益:** ¥{profit_loss_total:,.0f} （保有: {shares}株）")
+                if pd.notna(row.get('メモ (戦略など)')) and row.get('メモ (戦略など)'):
+                    st.caption(f"📝 メモ: {row.get('メモ (戦略など)')}")
                 
                 df_p['25MA'] = df_p['Close'].rolling(25).mean()
                 fig_p = go.Figure()
@@ -345,3 +389,14 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 st.markdown("---")
             except Exception as e:
                 st.error(f"エラーが発生しました: {e}")
+        
+        total_pnl = total_current_value - total_invested
+        pnl_percent = (total_pnl / total_invested * 100) if total_invested > 0 else 0
+        total_color = "normal" if total_pnl >= 0 else "inverse"
+        
+        with dash_placeholder.container():
+            st.markdown('<div class="total-dash"><h3>📊 ポートフォリオ総合ダッシュボード</h3></div>', unsafe_allow_html=True)
+            d1, d2 = st.columns(2)
+            d1.metric("総投資額 (元本)", f"¥{total_invested:,.0f}")
+            d2.metric("現在の総資産額", f"¥{total_current_value:,.0f}", f"{total_pnl:,.0f}円 ({pnl_percent:,.1f}%)", delta_color=total_color)
+            st.markdown("---")
