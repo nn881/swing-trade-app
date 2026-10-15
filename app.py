@@ -11,14 +11,13 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="スイング監視", layout="wide")
 
 # ==========================================
-# スマホ最適化 CSS (タイトル調整 ＆ 金額カードの装飾)
+# スマホ最適化 CSS
 # ==========================================
 st.markdown("""
     <style>
     @media (max-width: 768px) {
         h1 { font-size: 1.5rem !important; padding-bottom: 0px !important; }
     }
-    /* 金額表示（メトリクス）をカード風にして見やすくする */
     div[data-testid="metric-container"] {
         background-color: rgba(255, 255, 255, 0.05);
         border-radius: 8px;
@@ -64,7 +63,7 @@ def get_earnings_date(code):
     except: return None
 
 # ==========================================
-# セッション初期化 (ポートフォリオデータ追加)
+# セッション初期化 (ポートフォリオデータ)
 # ==========================================
 if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = "7203\n8306\n9984"
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
@@ -77,7 +76,7 @@ if "portfolio_df" not in st.session_state:
     })
 
 # ==========================================
-# サイドバー (機能切り替え)
+# サイドバー
 # ==========================================
 st.sidebar.header("📁 メニュー")
 app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄スクリーニング", "💼 保有銘柄ポートフォリオ"])
@@ -85,7 +84,7 @@ app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄�
 st.title("📈 スイングトレード監視ダッシュボード")
 
 # ==============================================================================
-# ページ1: 銘柄スクリーニング（新規発掘）
+# ページ1: 銘柄スクリーニング
 # ==============================================================================
 if app_page == "🔍 銘柄スクリーニング":
     st.sidebar.markdown("---")
@@ -186,14 +185,12 @@ if app_page == "🔍 銘柄スクリーニング":
             df_c['BB_std'] = df_c['Close'].rolling(25).std()
             df_c['BB_upper'], df_c['BB_lower'] = df_c['25MA'] + (df_c['BB_std']*2), df_c['25MA'] - (df_c['BB_std']*2)
             
-            # ATR計算 (現在値ベース)
             tr = pd.concat([df_c['High'] - df_c['Low'], abs(df_c['High'] - df_c['Close'].shift()), abs(df_c['Low'] - df_c['Close'].shift())], axis=1).max(axis=1)
             atr = tr.rolling(14).mean().iloc[-1]
             latest_price = df_c['Close'].iloc[-1]
             take_profit = latest_price + (atr * 2)
             stop_loss = latest_price - (atr * 1.5)
             
-            # --- 【スマホ改善】真上に金額カードを配置 ---
             col1, col2, col3 = st.columns(3)
             col1.metric("現在値 (Entry)", f"¥{latest_price:,.1f}")
             col2.metric("🎯 利確目標", f"¥{take_profit:,.1f}")
@@ -211,7 +208,6 @@ if app_page == "🔍 銘柄スクリーニング":
             fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
             
-            # 延長ライン
             f_date = df_c.index[-1] + timedelta(days=5)
             fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
             fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[stop_loss, stop_loss], mode='lines', name='損切ライン', line=dict(color='red', dash='dot')), row=1, col=1)
@@ -224,33 +220,59 @@ if app_page == "🔍 銘柄スクリーニング":
             fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
-            # --- 【スマホ改善】ドラッグ移動＋ピンチズーム設定 ---
-            fig.update_layout(
-                xaxis_rangeslider_visible=False, height=650, template="plotly_dark",
-                dragmode="pan", margin=dict(l=10, r=10, t=10, b=10),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
-            )
-            # scrollZoom=Trueでピンチズームを有効化
+            fig.update_layout(xaxis_rangeslider_visible=False, height=650, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
 # ==============================================================================
-# ページ2: 保有銘柄ポートフォリオ (新規機能)
+# ページ2: 保有銘柄ポートフォリオ (自動取得機能追加)
 # ==============================================================================
 elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
-    st.write("保有している銘柄の取得単価を入力すると、**「損益」**や**「取得単価を基準とした利確・損切ライン」**が自動計算されます。表は直接編集・行追加が可能です。")
+    st.write("保有している銘柄の情報を入力してください。表は直接編集・行追加が可能です。")
+    st.info("💡 **自動取得機能:** 「コード」と「取得日(YYYY/MM/DD)」を入力し、「取得単価」を **0** にしておくと、システムが自動でその日の株価を取得して入力します。後から手入力で修正することも可能です。")
     
-    # ユーザーが編集できるデータテーブル
+    # データエディタの表示
     edited_df = st.data_editor(st.session_state.portfolio_df, num_rows="dynamic", use_container_width=True)
-    st.session_state.portfolio_df = edited_df
     
+    # 取得単価が 0 の行があれば自動取得を走らせる
+    need_rerun = False
+    for index, row in edited_df.iterrows():
+        code = str(row.get('コード', '')).strip()
+        date_str = str(row.get('取得日', '')).strip()
+        
+        try: price = float(row.get('取得単価', 0.0))
+        except: price = 0.0
+            
+        if code and len(code) >= 4 and date_str and price == 0.0:
+            try:
+                # 複数の日付フォーマット( - や / )に対応
+                date_str = date_str.replace('-', '/')
+                dt = datetime.strptime(date_str, "%Y/%m/%d")
+                end_dt = dt + timedelta(days=7) # 休日を挟む場合を考慮して数日分取得
+                
+                df_hist = yf.Ticker(code + ".T").history(start=dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
+                if not df_hist.empty:
+                    auto_price = df_hist['Close'].iloc[0]
+                    edited_df.at[index, '取得単価'] = round(auto_price, 1)
+                    need_rerun = True
+            except:
+                pass
+
+    st.session_state.portfolio_df = edited_df
+    if need_rerun:
+        st.rerun()
+
     if st.button("🔄 最新の状況をチェックする", type="primary"):
         for index, row in edited_df.iterrows():
             code = str(row['コード']).strip()
             if not code: continue
             
-            entry_price = float(row['取得単価'])
-            shares = int(row['保有株数'])
+            try: entry_price = float(row['取得単価'])
+            except: entry_price = 0.0
+            
+            try: shares = int(row['保有株数'])
+            except: shares = 0
+                
             name = MAJOR_NAMES.get(code, code)
             
             st.markdown(f"### {code} {name}")
@@ -258,24 +280,20 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             try:
                 df_p = yf.Ticker(code + ".T").history(period="3mo")
                 if df_p.empty:
-                    st.error("データが取得できませんでした。コードを確認してください。")
+                    st.error("データが取得できませんでした。")
                     continue
                 
-                # ATR計算 (取得単価をベースにした利確・損切計算)
                 tr = pd.concat([df_p['High'] - df_p['Low'], abs(df_p['High'] - df_p['Close'].shift()), abs(df_p['Low'] - df_p['Close'].shift())], axis=1).max(axis=1)
                 atr = tr.rolling(14).mean().iloc[-1]
                 latest_price = df_p['Close'].iloc[-1]
                 
-                # 取得単価ベースの利確・損切りライン
-                take_profit = entry_price + (atr * 2)
-                stop_loss = entry_price - (atr * 1.5)
+                take_profit = entry_price + (atr * 2) if entry_price > 0 else 0
+                stop_loss = entry_price - (atr * 1.5) if entry_price > 0 else 0
                 
-                # 損益計算
                 profit_loss_per_share = latest_price - entry_price
                 profit_loss_total = profit_loss_per_share * shares
                 pl_color = "normal" if profit_loss_total >= 0 else "inverse"
                 
-                # --- スマホで見やすい金額カード ---
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("取得単価", f"¥{entry_price:,.1f}")
                 c2.metric("現在値", f"¥{latest_price:,.1f}", f"{profit_loss_per_share:,.1f}円", delta_color=pl_color)
@@ -284,16 +302,15 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 
                 st.info(f"💰 **評価損益:** ¥{profit_loss_total:,.0f} （保有: {shares}株）")
                 
-                # ミニチャート描画
                 df_p['25MA'] = df_p['Close'].rolling(25).mean()
                 fig_p = go.Figure()
                 fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
                 fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=1.5)))
                 
-                # 取得単価、利確、損切ラインをチャート全体に引く
-                fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left")
-                fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right")
-                fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right")
+                if entry_price > 0:
+                    fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left")
+                    fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right")
+                    fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right")
 
                 fig_p.update_layout(xaxis_rangeslider_visible=False, height=400, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10))
                 st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
