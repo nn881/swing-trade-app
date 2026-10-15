@@ -10,10 +10,21 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
+# ==========================================
+# スマホ最適化 CSS (タイトル調整 ＆ 金額カードの装飾)
+# ==========================================
 st.markdown("""
     <style>
     @media (max-width: 768px) {
         h1 { font-size: 1.5rem !important; padding-bottom: 0px !important; }
+    }
+    /* 金額表示（メトリクス）をカード風にして見やすくする */
+    div[data-testid="metric-container"] {
+        background-color: rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 10px;
+        text-align: center;
+        border: 1px solid rgba(255, 255, 255, 0.1);
     }
     </style>
 """, unsafe_allow_html=True)
@@ -35,241 +46,258 @@ MAJOR_NAMES = {
     "9020": "JR東日本", "9021": "JR西日本", "9022": "JR東海", "9101": "日本郵船", "9104": "商船三井", "9107": "川崎汽船", "9143": "SGHD", "9147": "NIPPON EXPRESS", "9201": "JAL", "9202": "ANA",
     "7911": "TOPPAN", "7912": "大日本印刷", "7936": "アシックス", "7951": "ヤマハ"
 }
-MAJOR_STOCKS = list(MAJOR_NAMES.keys())
-TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + MAJOR_STOCKS))
+TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
 
-# ==========================================
-# 新機能③ 決算日取得関数
-# ==========================================
 @st.cache_data(ttl=3600)
 def get_earnings_date(code):
     url = f"https://finance.yahoo.co.jp/quote/{code}.T"
-    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        html = requests.get(url, headers=headers, timeout=5).text
+        html = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3).text
         soup = BeautifulSoup(html, 'html.parser')
         text = soup.get_text(separator=' ', strip=True)
-        
-        # 決算発表日を抽出（例: "決算発表日 2026/11/05"）
         match = re.search(r'決算発表日.*?([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})', text)
         if match:
             date_str = match.group(1)
-            earnings_date = datetime.strptime(date_str, "%Y/%m/%d")
-            # 現在から7日以内か判定
-            days_left = (earnings_date - datetime.now()).days
-            if 0 <= days_left <= 7:
-                return f"⚠️ 注意：近日中に決算発表が予定されています（{date_str}）"
+            days_left = (datetime.strptime(date_str, "%Y/%m/%d") - datetime.now()).days
+            if 0 <= days_left <= 7: return f"⚠️ 近日決算予定（{date_str}）"
         return None
-    except:
-        return None
+    except: return None
 
-if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = "7203\n8306\n9984\n6758\n6861"
+# ==========================================
+# セッション初期化 (ポートフォリオデータ追加)
+# ==========================================
+if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = "7203\n8306\n9984"
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
-if "current_mode" not in st.session_state: st.session_state.current_mode = None
+if "portfolio_df" not in st.session_state:
+    st.session_state.portfolio_df = pd.DataFrame({
+        "コード": ["7203", "8306"],
+        "取得日": [datetime.now().strftime("%Y/%m/%d"), datetime.now().strftime("%Y/%m/%d")],
+        "取得単価": [2600.0, 3500.0],
+        "保有株数": [100, 200]
+    })
 
-st.sidebar.header("⚙️ 動作モード")
-mode = st.sidebar.radio("モードを選択", ["手動監視モード", "🤖 注目・主要銘柄 自動スクリーニング"], index=1)
-
-if st.session_state.current_mode != mode:
-    st.session_state.analysis_result = None
-    st.session_state.current_mode = mode
-
-tickers_to_analyze = []
-run_analysis = False
-
-if mode == "手動監視モード":
-    st.sidebar.write("監視したい銘柄コードを**改行**で入力してください")
-    ticker_input = st.sidebar.text_area("銘柄コード (1行に1つ)", value=st.session_state.manual_tickers, height=150)
-    if ticker_input != st.session_state.manual_tickers or st.session_state.analysis_result is None:
-        st.session_state.manual_tickers = ticker_input
-        tickers_to_analyze = [t.strip() + ".T" for t in ticker_input.split('\n') if t.strip()]
-        run_analysis = True
-else:
-    st.sidebar.success(f"ご自身の注目銘柄と主要銘柄（計{len(TARGET_STOCKS)}社）から自動抽出します。")
-    if st.sidebar.button("▶️ スクリーニング開始"):
-        tickers_to_analyze = [t + ".T" for t in TARGET_STOCKS]
-        run_analysis = True
+# ==========================================
+# サイドバー (機能切り替え)
+# ==========================================
+st.sidebar.header("📁 メニュー")
+app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄スクリーニング", "💼 保有銘柄ポートフォリオ"])
 
 st.title("📈 スイングトレード監視ダッシュボード")
 
-if run_analysis and tickers_to_analyze:
-    st.subheader("① 買いシグナル抽出結果")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    data_list = []
+# ==============================================================================
+# ページ1: 銘柄スクリーニング（新規発掘）
+# ==============================================================================
+if app_page == "🔍 銘柄スクリーニング":
+    st.sidebar.markdown("---")
+    st.sidebar.header("⚙️ 動作モード")
+    mode = st.sidebar.radio("モードを選択", ["手動監視モード", "🤖 注目・主要銘柄 自動スクリーニング"], index=1)
     
-    for i, ticker in enumerate(tickers_to_analyze):
-        code_str = ticker.replace('.T', '')
-        progress_bar.progress((i + 1) / len(tickers_to_analyze))
-        status_text.text(f"データ解析中... {i+1}/{len(tickers_to_analyze)} ({code_str})")
-        
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period="6mo")
-            if df.empty or len(df) < 60: continue
-            
-            df['5MA'] = df['Close'].rolling(window=5).mean()
-            df['25MA'] = df['Close'].rolling(window=25).mean()
-            df['Volume_5MA'] = df['Volume'].rolling(window=5).mean()
-            df['High_60'] = df['High'].rolling(window=60).max()
-            
-            latest_close = float(df['Close'].dropna().values[-1])
-            latest_5ma = float(df['5MA'].dropna().values[-1])
-            latest_25ma = float(df['25MA'].dropna().values[-1])
-            prev_5ma = float(df['5MA'].dropna().values[-2])
-            prev_25ma = float(df['25MA'].dropna().values[-2])
-            
-            latest_vol = float(df['Volume'].dropna().values[-1])
-            avg_vol_5 = float(df['Volume_5MA'].dropna().values[-2])
-            latest_high_60 = float(df['High_60'].dropna().values[-1])
-            
-            distance_to_res = ((latest_high_60 - latest_close) / latest_close) * 100
-            is_vol_surge = latest_vol > (avg_vol_5 * 1.5)
-            
-            delta = df['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-            latest_rsi = float(df['RSI'].dropna().values[-1])
-            
-            exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-            exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-            macd = exp1 - exp2
-            signal_line = macd.ewm(span=9, adjust=False).mean()
-            latest_macd, prev_macd = float(macd.dropna().values[-1]), float(macd.dropna().values[-2])
-            latest_sig, prev_sig = float(signal_line.dropna().values[-1]), float(signal_line.dropna().values[-2])
-            
-            is_gc_ma = (prev_5ma <= prev_25ma) and (latest_5ma > latest_25ma)
-            is_gc_macd = (prev_macd <= prev_sig) and (latest_macd > latest_sig)
-            is_uptrend = (latest_close > latest_25ma) and (latest_5ma > latest_25ma)
-            
-            signal_text = "様子見"
-            if is_gc_ma and is_gc_macd: signal_text = "🌟 超激アツ！(Wクロス)"
-            elif is_gc_ma: signal_text = "🔥 買い(MAクロス)"
-            elif is_gc_macd and is_uptrend: signal_text = "🔥 買い(MACD転換)"
-            elif is_uptrend: signal_text = "👍 上昇トレンド"
-            elif latest_close < latest_25ma and latest_rsi < 30: signal_text = "📉 売られすぎ(反発狙い)"
-            
-            if "買い" in signal_text or "激アツ" in signal_text:
-                if distance_to_res < 3.0: signal_text = "⚠️ 買い(上値抵抗線接近)"
-                elif is_vol_surge: signal_text = signal_text.replace("買い", "買い(大商い)").replace("超激アツ！", "超激アツ！(大商い)")
-
-            if mode == "🤖 注目・主要銘柄 自動スクリーニング":
-                if signal_text == "様子見" or "⚠️" in signal_text: continue
-            
-            name = MAJOR_NAMES.get(code_str, code_str)
-            if name == code_str:
-                try: name = stock.info.get('longName') or stock.info.get('shortName', code_str)
-                except: pass
-                
-            data_list.append({
-                "コード": code_str, "銘柄名": name, "終値": round(latest_close, 1),
-                "上値余地": f"{round(distance_to_res, 1)}%", "RSI": round(latest_rsi, 1), "判定": signal_text
-            })
-        except Exception:
-            continue
-            
-    status_text.text("✅ 解析完了！")
-    st.session_state.analysis_result = data_list
-    if data_list:
-        st.session_state.selected_code = data_list[0]["コード"]
-        st.session_state.selected_name = data_list[0]["銘柄名"]
-
-if st.session_state.analysis_result is not None:
-    data_list = st.session_state.analysis_result
+    tickers_to_analyze = []
+    run_analysis = False
     
-    if len(data_list) > 0:
-        df_result = pd.DataFrame(data_list)
-        df_result = df_result.sort_values('RSI', ascending=True).reset_index(drop=True)
-        
+    if mode == "手動監視モード":
+        st.sidebar.write("監視したい銘柄コードを**改行**で入力してください")
+        ticker_input = st.sidebar.text_area("銘柄コード", value=st.session_state.manual_tickers, height=150)
+        if ticker_input != st.session_state.manual_tickers or st.session_state.analysis_result is None:
+            st.session_state.manual_tickers = ticker_input
+            tickers_to_analyze = [t.strip() + ".T" for t in ticker_input.split('\n') if t.strip()]
+            run_analysis = True
+    else:
+        st.sidebar.success(f"主要銘柄（計{len(TARGET_STOCKS)}社）から自動抽出します。")
+        if st.sidebar.button("▶️ スクリーニング開始"):
+            tickers_to_analyze = [t + ".T" for t in TARGET_STOCKS]
+            run_analysis = True
+
+    if run_analysis and tickers_to_analyze:
         st.subheader("① 買いシグナル抽出結果")
-        st.write("👇 **表の行をタップすると、下のチャートが切り替わります**")
-        event = st.dataframe(df_result, use_container_width=True, on_select="rerun", selection_mode="single-row")
+        progress_bar = st.progress(0)
+        data_list = []
         
+        for i, ticker in enumerate(tickers_to_analyze):
+            code_str = ticker.replace('.T', '')
+            progress_bar.progress((i + 1) / len(tickers_to_analyze))
+            
+            try:
+                df = yf.Ticker(ticker).history(period="6mo")
+                if df.empty or len(df) < 60: continue
+                
+                df['5MA'] = df['Close'].rolling(window=5).mean()
+                df['25MA'] = df['Close'].rolling(window=25).mean()
+                df['Volume_5MA'] = df['Volume'].rolling(window=5).mean()
+                df['High_60'] = df['High'].rolling(window=60).max()
+                
+                c_c, c_5, c_25 = df['Close'].iloc[-1], df['5MA'].iloc[-1], df['25MA'].iloc[-1]
+                p_5, p_25 = df['5MA'].iloc[-2], df['25MA'].iloc[-2]
+                
+                is_vol_surge = df['Volume'].iloc[-1] > (df['Volume_5MA'].iloc[-2] * 1.5)
+                dist_res = ((df['High_60'].iloc[-1] - c_c) / c_c) * 100
+                
+                delta = df['Close'].diff()
+                rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
+                rsi = 100 - (100 / (1 + rs)).iloc[-1]
+                
+                macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+                sig = macd.ewm(span=9).mean()
+                
+                is_gc_ma = (p_5 <= p_25) and (c_5 > c_25)
+                is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1])
+                is_uptrend = (c_c > c_25) and (c_5 > c_25)
+                
+                sig_txt = "様子見"
+                if is_gc_ma and is_gc_macd: sig_txt = "🌟 超激アツ！(Wクロス)"
+                elif is_gc_ma: sig_txt = "🔥 買い(MAクロス)"
+                elif is_gc_macd and is_uptrend: sig_txt = "🔥 買い(MACD転換)"
+                elif is_uptrend: sig_txt = "👍 上昇トレンド"
+                elif c_c < c_25 and rsi < 30: sig_txt = "📉 売られすぎ(反発狙い)"
+                
+                if "買い" in sig_txt or "激アツ" in sig_txt:
+                    if dist_res < 3.0: sig_txt = "⚠️ 買い(上値抵抗線接近)"
+                    elif is_vol_surge: sig_txt = sig_txt.replace("買い", "買い(大商い)").replace("超激アツ！", "超激アツ！(大商い)")
+
+                if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (sig_txt == "様子見" or "⚠️" in sig_txt): continue
+                
+                name = MAJOR_NAMES.get(code_str, code_str)
+                data_list.append({"コード": code_str, "銘柄名": name, "終値": round(c_c, 1), "上値余地": f"{round(dist_res, 1)}%", "RSI": round(rsi, 1), "判定": sig_txt})
+            except: continue
+                
+        st.session_state.analysis_result = data_list
+        if data_list:
+            st.session_state.selected_code = data_list[0]["コード"]
+            st.session_state.selected_name = data_list[0]["銘柄名"]
+
+    if st.session_state.analysis_result:
+        df_res = pd.DataFrame(st.session_state.analysis_result).sort_values('RSI').reset_index(drop=True)
+        st.subheader("① 買いシグナル抽出結果")
+        event = st.dataframe(df_res, use_container_width=True, on_select="rerun", selection_mode="single-row")
         if event.selection.rows:
-            selected_index = event.selection.rows[0]
-            st.session_state.selected_code = df_result.iloc[selected_index]["コード"]
-            st.session_state.selected_name = df_result.iloc[selected_index]["銘柄名"]
+            st.session_state.selected_code = df_res.iloc[event.selection.rows[0]]["コード"]
+            st.session_state.selected_name = df_res.iloc[event.selection.rows[0]]["銘柄名"]
             
         st.subheader(f"② {st.session_state.selected_code} {st.session_state.selected_name} の詳細分析")
+        warn = get_earnings_date(st.session_state.selected_code)
+        if warn: st.error(warn)
         
-        # 新機能③：決算日警告の表示
-        warning_msg = get_earnings_date(st.session_state.selected_code)
-        if warning_msg:
-            st.error(warning_msg)
+        st.link_button(f"🔗 {st.session_state.selected_name} の「信用残高・信用倍率」を確認する", f"https://finance.yahoo.co.jp/quote/{st.session_state.selected_code}.T/margin", type="primary")
         
-        st.info("💡 信用倍率や買残などの需給データは、以下のボタンからYahoo!ファイナンスで正確な最新情報をご確認ください。")
-        yahoo_url = f"https://finance.yahoo.co.jp/quote/{st.session_state.selected_code}.T/margin"
-        st.link_button(f"🔗 {st.session_state.selected_name} の「信用残高・信用倍率」を確認する", yahoo_url, type="primary")
-        
-        selected_ticker = st.session_state.selected_code + ".T"
-        df_chart = yf.Ticker(selected_ticker).history(period="6mo")
-        
-        if not df_chart.empty:
-            df_chart['5MA'] = df_chart['Close'].rolling(window=5).mean()
-            df_chart['25MA'] = df_chart['Close'].rolling(window=25).mean()
+        df_c = yf.Ticker(st.session_state.selected_code + ".T").history(period="6mo")
+        if not df_c.empty:
+            df_c['5MA'] = df_c['Close'].rolling(5).mean()
+            df_c['25MA'] = df_c['Close'].rolling(25).mean()
+            df_c['BB_std'] = df_c['Close'].rolling(25).std()
+            df_c['BB_upper'], df_c['BB_lower'] = df_c['25MA'] + (df_c['BB_std']*2), df_c['25MA'] - (df_c['BB_std']*2)
             
-            # 新機能①：ボリンジャーバンド計算
-            df_chart['BB_std'] = df_chart['Close'].rolling(window=25).std()
-            df_chart['BB_upper'] = df_chart['25MA'] + (df_chart['BB_std'] * 2)
-            df_chart['BB_lower'] = df_chart['25MA'] - (df_chart['BB_std'] * 2)
+            # ATR計算 (現在値ベース)
+            tr = pd.concat([df_c['High'] - df_c['Low'], abs(df_c['High'] - df_c['Close'].shift()), abs(df_c['Low'] - df_c['Close'].shift())], axis=1).max(axis=1)
+            atr = tr.rolling(14).mean().iloc[-1]
+            latest_price = df_c['Close'].iloc[-1]
+            take_profit = latest_price + (atr * 2)
+            stop_loss = latest_price - (atr * 1.5)
             
-            # 新機能②：リスク管理（ATRを利用した利確・損切りライン）計算
-            df_chart['High-Low'] = df_chart['High'] - df_chart['Low']
-            df_chart['High-PrevClose'] = abs(df_chart['High'] - df_chart['Close'].shift(1))
-            df_chart['Low-PrevClose'] = abs(df_chart['Low'] - df_chart['Close'].shift(1))
-            df_chart['TR'] = df_chart[['High-Low', 'High-PrevClose', 'Low-PrevClose']].max(axis=1)
-            atr = df_chart['TR'].rolling(window=14).mean().iloc[-1]
+            # --- 【スマホ改善】真上に金額カードを配置 ---
+            col1, col2, col3 = st.columns(3)
+            col1.metric("現在値 (Entry)", f"¥{latest_price:,.1f}")
+            col2.metric("🎯 利確目標", f"¥{take_profit:,.1f}")
+            col3.metric("✂️ 損切ライン", f"¥{stop_loss:,.1f}")
             
-            latest_c = df_chart['Close'].iloc[-1]
-            take_profit = latest_c + (atr * 2) # 利確目標（現在値 + ATR×2）
-            stop_loss = latest_c - (atr * 1.5) # 損切りライン（現在値 - ATR×1.5）
-            
-            exp1 = df_chart['Close'].ewm(span=12, adjust=False).mean()
-            exp2 = df_chart['Close'].ewm(span=26, adjust=False).mean()
-            df_chart['MACD'] = exp1 - exp2
-            df_chart['Signal'] = df_chart['MACD'].ewm(span=9, adjust=False).mean()
-            df_chart['MACD_Hist'] = df_chart['MACD'] - df_chart['Signal']
-            
-            delta = df_chart['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            df_chart['RSI'] = 100 - (100 / (1 + (gain / loss)))
+            macd = df_c['Close'].ewm(span=12).mean() - df_c['Close'].ewm(span=26).mean()
+            sig = macd.ewm(span=9).mean()
+            delta = df_c['Close'].diff()
+            rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / -delta.where(delta < 0, 0).rolling(14).mean())))
 
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
-
-            # ローソク足と移動平均線
-            fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name='ローソク足'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['5MA'], mode='lines', name='5日線', line=dict(color='lime', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=1.5)), row=1, col=1)
+            fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['5MA'], mode='lines', name='5日線', line=dict(color='lime', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=1.5)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
             
-            # ボリンジャーバンド描画（半透明の帯）
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='ボリンジャー±2σ'), row=1, col=1)
-            
-            # リスク管理ライン（最新日から未来方向へ線を引く）
-            last_date = df_chart.index[-1]
-            future_date = last_date + timedelta(days=5) # 5日先まで線を伸ばす
-            fig.add_trace(go.Scatter(x=[last_date, future_date], y=[take_profit, take_profit], mode='lines+text', text=["", "🎯 利確目安"], textposition="top right", name='利確目安', line=dict(color='lightgreen', width=2, dash='dot')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=[last_date, future_date], y=[stop_loss, stop_loss], mode='lines+text', text=["", "✂️ 損切ライン"], textposition="bottom right", name='損切ライン', line=dict(color='red', width=2, dash='dot')), row=1, col=1)
+            # 延長ライン
+            f_date = df_c.index[-1] + timedelta(days=5)
+            fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[stop_loss, stop_loss], mode='lines', name='損切ライン', line=dict(color='red', dash='dot')), row=1, col=1)
 
-            # MACDとRSI
-            fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['MACD_Hist'], name='MACDヒストグラム', marker_color='gray'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MACD'], mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Signal'], mode='lines', name='シグナル', line=dict(color='magenta', width=1)), row=2, col=1)
+            fig.add_trace(go.Bar(x=df_c.index, y=macd-sig, name='MACD Hist', marker_color='gray'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=2, col=1)
 
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['RSI'], mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_c.index, y=rsi, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
             fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
+            # --- 【スマホ改善】ドラッグ移動＋ピンチズーム設定 ---
             fig.update_layout(
-                xaxis_rangeslider_visible=False, 
-                height=650, 
-                template="plotly_dark",
-                margin=dict(l=10, r=10, t=10, b=10), 
+                xaxis_rangeslider_visible=False, height=650, template="plotly_dark",
+                dragmode="pan", margin=dict(l=10, r=10, t=10, b=10),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
             )
+            # scrollZoom=Trueでピンチズームを有効化
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
+
+# ==============================================================================
+# ページ2: 保有銘柄ポートフォリオ (新規機能)
+# ==============================================================================
+elif app_page == "💼 保有銘柄ポートフォリオ":
+    st.subheader("💼 保有銘柄の管理")
+    st.write("保有している銘柄の取得単価を入力すると、**「損益」**や**「取得単価を基準とした利確・損切ライン」**が自動計算されます。表は直接編集・行追加が可能です。")
+    
+    # ユーザーが編集できるデータテーブル
+    edited_df = st.data_editor(st.session_state.portfolio_df, num_rows="dynamic", use_container_width=True)
+    st.session_state.portfolio_df = edited_df
+    
+    if st.button("🔄 最新の状況をチェックする", type="primary"):
+        for index, row in edited_df.iterrows():
+            code = str(row['コード']).strip()
+            if not code: continue
             
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-    else:
-        st.warning("現在、強力な買いシグナルが出ている銘柄は見つかりませんでした。")
+            entry_price = float(row['取得単価'])
+            shares = int(row['保有株数'])
+            name = MAJOR_NAMES.get(code, code)
+            
+            st.markdown(f"### {code} {name}")
+            
+            try:
+                df_p = yf.Ticker(code + ".T").history(period="3mo")
+                if df_p.empty:
+                    st.error("データが取得できませんでした。コードを確認してください。")
+                    continue
+                
+                # ATR計算 (取得単価をベースにした利確・損切計算)
+                tr = pd.concat([df_p['High'] - df_p['Low'], abs(df_p['High'] - df_p['Close'].shift()), abs(df_p['Low'] - df_p['Close'].shift())], axis=1).max(axis=1)
+                atr = tr.rolling(14).mean().iloc[-1]
+                latest_price = df_p['Close'].iloc[-1]
+                
+                # 取得単価ベースの利確・損切りライン
+                take_profit = entry_price + (atr * 2)
+                stop_loss = entry_price - (atr * 1.5)
+                
+                # 損益計算
+                profit_loss_per_share = latest_price - entry_price
+                profit_loss_total = profit_loss_per_share * shares
+                pl_color = "normal" if profit_loss_total >= 0 else "inverse"
+                
+                # --- スマホで見やすい金額カード ---
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("取得単価", f"¥{entry_price:,.1f}")
+                c2.metric("現在値", f"¥{latest_price:,.1f}", f"{profit_loss_per_share:,.1f}円", delta_color=pl_color)
+                c3.metric("🎯 利確目標", f"¥{take_profit:,.1f}")
+                c4.metric("✂️ 損切ライン", f"¥{stop_loss:,.1f}")
+                
+                st.info(f"💰 **評価損益:** ¥{profit_loss_total:,.0f} （保有: {shares}株）")
+                
+                # ミニチャート描画
+                df_p['25MA'] = df_p['Close'].rolling(25).mean()
+                fig_p = go.Figure()
+                fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
+                fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['25MA'], mode='lines', name='25日線', line=dict(color='orange', width=1.5)))
+                
+                # 取得単価、利確、損切ラインをチャート全体に引く
+                fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left")
+                fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right")
+                fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right")
+
+                fig_p.update_layout(xaxis_rangeslider_visible=False, height=400, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
+                
+                st.markdown("---")
+            except Exception as e:
+                st.error(f"エラーが発生しました: {e}")
