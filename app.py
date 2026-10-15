@@ -391,9 +391,11 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice)
                 
                 if not df_p.empty:
+                    df_p['MA_S'] = df_p['Close'].rolling(ma_s).mean() # ←追加：短期線を計算
                     df_p['MA_L'] = df_p['Close'].rolling(ma_l).mean()
                     fig_p = go.Figure()
                     fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1))) # ←追加：緑色で短期線を描画
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)))
                     
                     if entry_price > 0:
