@@ -6,6 +6,7 @@ from plotly.subplots import make_subplots
 import requests
 from bs4 import BeautifulSoup
 import re
+import os
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="スイング監視", layout="wide")
@@ -63,17 +64,38 @@ def get_earnings_date(code):
     except: return None
 
 # ==========================================
-# セッション初期化 (ポートフォリオデータ)
+# データの保存・読み込み（永続化機能）
 # ==========================================
-if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = "7203\n8306\n9984"
-if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
-if "portfolio_df" not in st.session_state:
-    st.session_state.portfolio_df = pd.DataFrame({
-        "コード": ["7203", "8306"],
-        "取得日": [datetime.now().strftime("%Y/%m/%d"), datetime.now().strftime("%Y/%m/%d")],
-        "取得単価": [2600.0, 3500.0],
-        "保有株数": [100, 200]
+PORTFOLIO_FILE = "portfolio_data.csv"
+TICKERS_FILE = "manual_tickers_data.txt"
+
+def load_tickers():
+    if os.path.exists(TICKERS_FILE):
+        with open(TICKERS_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    return "" # 初期状態は空
+
+def save_tickers(text):
+    with open(TICKERS_FILE, "w", encoding="utf-8") as f:
+        f.write(text)
+
+def load_portfolio():
+    if os.path.exists(PORTFOLIO_FILE):
+        return pd.read_csv(PORTFOLIO_FILE)
+    # 初期状態は空の表（列の枠組みだけ作成）
+    return pd.DataFrame({
+        "コード": pd.Series(dtype='str'),
+        "取得日": pd.Series(dtype='str'),
+        "取得単価": pd.Series(dtype='float'),
+        "保有株数": pd.Series(dtype='int')
     })
+
+def save_portfolio(df):
+    df.to_csv(PORTFOLIO_FILE, index=False)
+
+if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = load_tickers()
+if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
+if "portfolio_df" not in st.session_state: st.session_state.portfolio_df = load_portfolio()
 
 # ==========================================
 # サイドバー
@@ -97,9 +119,14 @@ if app_page == "🔍 銘柄スクリーニング":
     if mode == "手動監視モード":
         st.sidebar.write("監視したい銘柄コードを**改行**で入力してください")
         ticker_input = st.sidebar.text_area("銘柄コード", value=st.session_state.manual_tickers, height=150)
-        if ticker_input != st.session_state.manual_tickers or st.session_state.analysis_result is None:
+        
+        # 入力内容が変更されたら保存する
+        if ticker_input != st.session_state.manual_tickers:
             st.session_state.manual_tickers = ticker_input
-            tickers_to_analyze = [t.strip() + ".T" for t in ticker_input.split('\n') if t.strip()]
+            save_tickers(ticker_input)
+            
+        tickers_to_analyze = [t.strip() + ".T" for t in st.session_state.manual_tickers.split('\n') if t.strip()]
+        if tickers_to_analyze:
             run_analysis = True
     else:
         st.sidebar.success(f"主要銘柄（計{len(TARGET_STOCKS)}社）から自動抽出します。")
@@ -224,17 +251,15 @@ if app_page == "🔍 銘柄スクリーニング":
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
 # ==============================================================================
-# ページ2: 保有銘柄ポートフォリオ (自動取得機能追加)
+# ページ2: 保 बुन्देल銘柄ポートフォリオ (自動保存機能つき)
 # ==============================================================================
 elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
     st.write("保有している銘柄の情報を入力してください。表は直接編集・行追加が可能です。")
     st.info("💡 **自動取得機能:** 「コード」と「取得日(YYYY/MM/DD)」を入力し、「取得単価」を **0** にしておくと、システムが自動でその日の株価を取得して入力します。後から手入力で修正することも可能です。")
     
-    # データエディタの表示
     edited_df = st.data_editor(st.session_state.portfolio_df, num_rows="dynamic", use_container_width=True)
     
-    # 取得単価が 0 の行があれば自動取得を走らせる
     need_rerun = False
     for index, row in edited_df.iterrows():
         code = str(row.get('コード', '')).strip()
@@ -245,10 +270,9 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             
         if code and len(code) >= 4 and date_str and price == 0.0:
             try:
-                # 複数の日付フォーマット( - や / )に対応
                 date_str = date_str.replace('-', '/')
                 dt = datetime.strptime(date_str, "%Y/%m/%d")
-                end_dt = dt + timedelta(days=7) # 休日を挟む場合を考慮して数日分取得
+                end_dt = dt + timedelta(days=7) 
                 
                 df_hist = yf.Ticker(code + ".T").history(start=dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
                 if not df_hist.empty:
@@ -258,14 +282,17 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             except:
                 pass
 
-    st.session_state.portfolio_df = edited_df
-    if need_rerun:
-        st.rerun()
+    # テーブルの内容に変更があった場合、ファイルに保存する
+    if not edited_df.equals(st.session_state.portfolio_df) or need_rerun:
+        st.session_state.portfolio_df = edited_df
+        save_portfolio(edited_df)
+        if need_rerun:
+            st.rerun()
 
     if st.button("🔄 最新の状況をチェックする", type="primary"):
         for index, row in edited_df.iterrows():
-            code = str(row['コード']).strip()
-            if not code: continue
+            code = str(row.get('コード', '')).strip()
+            if not code or str(code) == 'nan': continue
             
             try: entry_price = float(row['取得単価'])
             except: entry_price = 0.0
