@@ -11,9 +11,6 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
-# ==========================================
-# スマホ最適化 CSS
-# ==========================================
 st.markdown("""
     <style>
     @media (max-width: 768px) {
@@ -56,9 +53,6 @@ MAJOR_NAMES = {
 }
 TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
 
-# ==========================================
-# ユーティリティ・アラート関数
-# ==========================================
 @st.cache_data(ttl=3600)
 def get_earnings_date(code):
     url = f"https://finance.yahoo.co.jp/quote/{code}.T"
@@ -91,9 +85,6 @@ def get_chart_data(code, tf_choice):
         df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
-# ==========================================
-# データの保存・読み込み（永続化機能）
-# ==========================================
 PORTFOLIO_FILE = "portfolio_data.csv"
 TICKERS_FILE = "manual_tickers_data.txt"
 
@@ -110,8 +101,6 @@ def load_portfolio():
         df = pd.read_csv(PORTFOLIO_FILE, dtype={"コード": str})
         if '口座区分' in df.columns: df = df.drop(columns=['口座区分'])
         return df
-    
-    # 【修正】保有株数を Float 型で初期化する
     return pd.DataFrame({
         "コード": pd.Series(dtype='str'),
         "取得日": pd.Series(dtype='str'),
@@ -128,9 +117,6 @@ if "analysis_result" not in st.session_state: st.session_state.analysis_result =
 if "portfolio_df" not in st.session_state: st.session_state.portfolio_df = load_portfolio()
 if "show_portfolio_charts" not in st.session_state: st.session_state.show_portfolio_charts = False
 
-# ==========================================
-# サイドバー
-# ==========================================
 st.sidebar.header("📁 メニュー")
 app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄スクリーニング", "💼 保有銘柄ポートフォリオ"])
 
@@ -197,9 +183,14 @@ if app_page == "🔍 銘柄スクリーニング":
                 macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
                 sig = macd.ewm(span=9).mean()
                 
-                is_gc_ma = (p_5 <= p_25) and (c_5 > c_25)
-                is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1])
-                is_uptrend = (c_c > c_25) and (c_5 > c_25)
+                # ==================================================
+                # 🛡️ 【新機能】ダマシ回避フィルター：25日線が上向きか横ばい
+                # ==================================================
+                is_25ma_up = (c_25 >= p_25)
+                
+                is_gc_ma = (p_5 <= p_25) and (c_5 > c_25) and is_25ma_up
+                is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
+                is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
                 
                 sig_txt = "様子見"
                 if is_gc_ma and is_gc_macd: sig_txt = "🌟 超激アツ！(Wクロス)"
@@ -299,7 +290,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
     st.write("保有しているスイング銘柄を管理します。")
     
-    # 【修正】保有株数の列を NumberColumn に指定し、小数の入力を許可する
     edited_df = st.data_editor(
         st.session_state.portfolio_df, 
         num_rows="dynamic", 
@@ -357,8 +347,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             
             try: entry_price = float(row['取得単価'])
             except: entry_price = 0.0
-            
-            # 【修正】保有株数を Float 型で受け取るように変更
             try: shares = float(row['保有株数'])
             except: shares = 0.0
                 
@@ -395,7 +383,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 c3.metric("🎯 利確目標", f"¥{take_profit:,.1f}")
                 c4.metric("✂️ 損切ライン", f"¥{stop_loss:,.1f}")
                 
-                # 【修正】株数の表示を小数点に対応 ( .g フォーマットで末尾の不要な0を削除 )
                 st.info(f"💰 **評価損益:** ¥{profit_loss_total:,.0f} （保有: {shares:g}株）")
                 
                 if pd.notna(row.get('メモ (戦略など)')) and row.get('メモ (戦略など)'):
