@@ -107,7 +107,9 @@ def save_tickers(text):
 
 def load_portfolio():
     if os.path.exists(PORTFOLIO_FILE):
-        df = pd.read_csv(PORTFOLIO_FILE, dtype={"コード": str})
+        df = pd.read_csv(PORTFOLIO_FILE, dtype={"コード": str, "取得日": str, "メモ (戦略など)": str})
+        # 【修正】空欄（NaN）が原因のエラーを防ぐため、強制的に空白や0に置き換える
+        df = df.fillna({'コード': '', '取得日': '', '取得単価': 0.0, '保有株数': 0.0, 'メモ (戦略など)': ''})
         if '口座区分' in df.columns: df = df.drop(columns=['口座区分'])
         return df
     
@@ -202,7 +204,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
                 is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
                 
-                # 総合判定スコア
                 score = 0
                 base_txt = "シグナル無"
                 
@@ -233,7 +234,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 
                 score = max(0, min(5, score))
                 
-                # 【修正】星の数を利用したランク表記（昇順ソートでSが一番上に来る魔法の文字列）
                 if score >= 4: rank_str = "★★★★★ 【S】強気買い"
                 elif score == 3: rank_str = "★★★★☆ 【A】買いシグナル"
                 elif score == 2: rank_str = "★★★☆☆ 【B】順張り"
@@ -255,9 +255,7 @@ if app_page == "🔍 銘柄スクリーニング":
             st.session_state.selected_name = data_list[0]["銘柄名"]
 
     if st.session_state.analysis_result:
-        # 【修正】デフォルトの並び順を「判定（星の数）」の昇順（Sがトップ）に設定
         df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(['判定', 'RSI'], ascending=[True, True]).reset_index(drop=True)
-        
         st.subheader("① 買いシグナル抽出結果")
         event = st.dataframe(df_res, use_container_width=True, on_select="rerun", selection_mode="single-row")
         if event.selection.rows:
@@ -332,43 +330,53 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
     st.write("保有しているスイング銘柄を管理します。")
     
+    # 【修正1】エラーを防ぐため各列のデータ型を明示的に指定
     edited_df = st.data_editor(
         st.session_state.portfolio_df, 
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
             "コード": st.column_config.TextColumn("コード (4桁)"),
+            "取得日": st.column_config.TextColumn("取得日 (YYYY/MM/DD)"),
+            "取得単価": st.column_config.NumberColumn("取得単価", format="%g"),
             "保有株数": st.column_config.NumberColumn("保有株数", step=0.01, format="%g"),
             "メモ (戦略など)": st.column_config.TextColumn("メモ (戦略など)", max_chars=100)
         }
     )
     
-    need_rerun = False
+    need_auto_fetch_rerun = False
     for index, row in edited_df.iterrows():
+        # 【修正2】NaN（空欄エラー）の完全排除
         code = str(row.get('コード', '')).strip()
         if code.endswith('.0'): code = code[:-2]
+        if code.lower() in ['nan', 'none']: code = ''
             
         date_str = str(row.get('取得日', '')).strip()
+        if date_str.lower() in ['nan', 'none']: date_str = ''
+            
         try: price = float(row.get('取得単価', 0.0))
         except: price = 0.0
             
-        if code and len(code) >= 4 and code.lower() != 'nan' and date_str and price == 0.0:
+        if code and len(code) >= 4 and date_str and price == 0.0:
             try:
-                date_str = date_str.replace('-', '/')
-                dt = datetime.strptime(date_str, "%Y/%m/%d")
+                date_str_fmt = date_str.replace('-', '/')
+                dt = datetime.strptime(date_str_fmt, "%Y/%m/%d")
                 end_dt = dt + timedelta(days=7) 
                 
                 df_hist = yf.Ticker(code + ".T").history(start=dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
                 if not df_hist.empty:
                     auto_price = df_hist['Close'].iloc[0]
                     edited_df.at[index, '取得単価'] = round(auto_price, 1)
-                    need_rerun = True
+                    need_auto_fetch_rerun = True
             except: pass
 
-    if not edited_df.equals(st.session_state.portfolio_df) or need_rerun:
+    # 【修正3】ユーザーの入力中は強制リロードさせず、裏側でサイレントにファイル保存だけ行う
+    save_portfolio(edited_df)
+
+    # 【修正3】自動取得でシステムが単価を書き換えた時のみ強制リロードを行う
+    if need_auto_fetch_rerun:
         st.session_state.portfolio_df = edited_df
-        save_portfolio(edited_df)
-        if need_rerun: st.rerun()
+        st.rerun()
 
     st.markdown("---")
     dash_placeholder = st.empty()
@@ -385,7 +393,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
         for index, row in edited_df.iterrows():
             code = str(row.get('コード', '')).strip()
             if code.endswith('.0'): code = code[:-2]
-            if not code or code.lower() == 'nan': continue
+            if not code or code.lower() in ['nan', 'none']: continue
             
             try: entry_price = float(row['取得単価'])
             except: entry_price = 0.0
@@ -427,8 +435,9 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 
                 st.info(f"💰 **評価損益:** ¥{profit_loss_total:,.0f} （保有: {shares:g}株）")
                 
-                if pd.notna(row.get('メモ (戦略など)')) and row.get('メモ (戦略など)'):
-                    st.caption(f"📝 メモ: {row.get('メモ (戦略など)')}")
+                memo_txt = str(row.get('メモ (戦略など)', '')).strip()
+                if memo_txt and memo_txt.lower() not in ['nan', 'none']:
+                    st.caption(f"📝 メモ: {memo_txt}")
                 
                 df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice)
                 
