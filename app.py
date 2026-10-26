@@ -118,9 +118,6 @@ def get_chart_data(code, tf_choice):
         df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
-# ==========================================
-# データの保存・読み込み（永続化機能）
-# ==========================================
 PORTFOLIO_FILE = "portfolio_data.csv"
 TICKERS_FILE = "manual_tickers_data.txt"
 
@@ -225,6 +222,14 @@ if app_page == "🔍 銘柄スクリーニング":
         progress_bar = st.progress(0)
         data_list = []
         
+        # 🌐 【新機能】日経平均のパフォーマンスを事前取得（RS判定用）
+        nikkei_5d_ret = 0.0
+        try:
+            nikkei_df = yf.Ticker("^N225").history(period="1mo")
+            if not nikkei_df.empty and len(nikkei_df) >= 6:
+                nikkei_5d_ret = (nikkei_df['Close'].iloc[-1] - nikkei_df['Close'].iloc[-6]) / nikkei_df['Close'].iloc[-6]
+        except: pass
+        
         for i, ticker in enumerate(tickers_to_analyze):
             code_str = ticker.replace('.T', '')
             progress_bar.progress((i + 1) / len(tickers_to_analyze))
@@ -233,6 +238,7 @@ if app_page == "🔍 銘柄スクリーニング":
                 df = yf.Ticker(ticker).history(period="1y")
                 if df.empty or len(df) < 80: continue
                 
+                # 移動平均・ボリンジャーバンド
                 df['5MA'] = df['Close'].rolling(window=5).mean()
                 df['25MA'] = df['Close'].rolling(window=25).mean()
                 df['75MA'] = df['Close'].rolling(window=75).mean()
@@ -240,9 +246,23 @@ if app_page == "🔍 銘柄スクリーニング":
                 df['High_60'] = df['High'].rolling(window=60).max()
                 df['High_20'] = df['High'].rolling(window=20).max()
                 
+                df['BB_std'] = df['Close'].rolling(window=25).std()
+                df['BB_upper'] = df['25MA'] + (df['BB_std'] * 2)
+                df['BB_lower'] = df['25MA'] - (df['BB_std'] * 2)
+                df['BB_width'] = df['BB_upper'] - df['BB_lower']
+                
+                # 一目均衡表
+                high_9, low_9 = df['High'].rolling(9).max(), df['Low'].rolling(9).min()
+                df['Tenkan'] = (high_9 + low_9) / 2
+                high_26, low_26 = df['High'].rolling(26).max(), df['Low'].rolling(26).min()
+                df['Kijun'] = (high_26 + low_26) / 2
+                df['Senkou_A'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(25)
+                high_52, low_52 = df['High'].rolling(52).max(), df['Low'].rolling(52).min()
+                df['Senkou_B'] = ((high_52 + low_52) / 2).shift(25)
+                
                 c_c = df['Close'].iloc[-1]
                 c_5, c_25, c_75 = df['5MA'].iloc[-1], df['25MA'].iloc[-1], df['75MA'].iloc[-1]
-                p_5, p_25 = df['5MA'].iloc[-2], df['25MA'].iloc[-2]
+                p_5, p_25, p_75 = df['5MA'].iloc[-2], df['25MA'].iloc[-2], df['75MA'].iloc[-2]
                 
                 is_vol_surge = df['Volume'].iloc[-1] > (df['Volume_5MA'].iloc[-2] * 1.5)
                 dist_res = ((df['High_60'].iloc[-1] - c_c) / c_c) * 100
@@ -254,27 +274,69 @@ if app_page == "🔍 銘柄スクリーニング":
                 macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
                 sig = macd.ewm(span=9).mean()
                 
+                # トレンド判定
                 is_25ma_up = (c_25 >= p_25)
                 is_gc_ma = (p_5 <= p_25) and (c_5 > c_25) and is_25ma_up
                 is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
                 is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
                 
+                # 新判定：パーフェクトオーダー
+                is_po = (c_5 > c_25 > c_75) and (c_5 >= p_5) and (c_25 >= p_25) and (c_75 >= p_75)
+                
+                # 新判定：バンドウォーク初動
+                is_bb_exp = df['BB_width'].iloc[-1] > (df['BB_width'].iloc[-5] * 1.1)
+                is_bandwalk = is_bb_exp and (c_c >= (c_25 + df['BB_std'].iloc[-1])) # +1σ以上
+                
+                # 新判定：対日経相対強度 (RS)
+                stock_5d_ret = (c_c - df['Close'].iloc[-6]) / df['Close'].iloc[-6]
+                is_rs_strong = (stock_5d_ret > 0) and (stock_5d_ret > nikkei_5d_ret + 0.03) # 日経より3%以上強い
+                
+                # 新判定：一目均衡表 雲抜け・三役好転
+                senkou_max = max(df['Senkou_A'].iloc[-1], df['Senkou_B'].iloc[-1])
+                p_senkou_max = max(df['Senkou_A'].iloc[-2], df['Senkou_B'].iloc[-2])
+                is_above_cloud = c_c > senkou_max
+                is_cloud_breakout = is_above_cloud and (df['Close'].iloc[-2] <= p_senkou_max)
+                is_tenkan_above_kijun = df['Tenkan'].iloc[-1] > df['Kijun'].iloc[-1]
+                is_chikou_above = c_c > df['Close'].iloc[-26] if len(df) >= 26 else False
+                is_sanyaku = is_above_cloud and is_tenkan_above_kijun and is_chikou_above
+                
+                # ==================================================
+                # 💯 総合スコアリングロジック (Max 100+)
+                # ==================================================
                 score = 0
                 reasons = []
                 
-                if c_c > c_25: score += 10
-                if c_5 > c_25: score += 10
-                if is_25ma_up: score += 10
-                if c_25 > c_75 and c_c > c_75:
-                    score += 10
-                    reasons.append("長期上昇")
-
-                if is_gc_ma:
+                # ベースの強さ
+                if is_po:
                     score += 20
+                    reasons.append("✨パーフェクトオーダー")
+                elif c_c > c_25 and c_5 > c_25 and is_25ma_up:
+                    score += 10
+                    
+                if c_25 > c_75 and c_c > c_75:
+                    score += 5
+                    
+                # シグナル
+                if is_gc_ma:
+                    score += 15
                     reasons.append("MAクロス")
                 if is_gc_macd:
                     score += 15
                     reasons.append("MACD転換")
+                    
+                # 特殊テクニカル
+                if is_bandwalk:
+                    score += 15
+                    reasons.append("🚀バンドウォーク")
+                if is_rs_strong:
+                    score += 10
+                    reasons.append("💪対日経強勢")
+                if is_sanyaku:
+                    score += 15
+                    reasons.append("☀️三役好転(一目)")
+                elif is_cloud_breakout:
+                    score += 10
+                    reasons.append("☁️雲抜け(一目)")
                     
                 if 50 <= rsi <= 75:
                     score += 10
@@ -283,13 +345,13 @@ if app_page == "🔍 銘柄スクリーニング":
                     reasons.append("売られすぎ水準")
                     
                 if is_vol_surge:
-                    score += 15
+                    score += 10
                     reasons.append("出来高急増")
-                    
                 if c_c >= df['High_20'].iloc[-2]:
                     score += 10
                     reasons.append("高値更新")
 
+                # リスク減点
                 if dist_res < 3.0:
                     score -= 20
                     reasons.append("⚠️上値抵抗線接近")
@@ -298,12 +360,12 @@ if app_page == "🔍 銘柄スクリーニング":
                     reasons.append("⚠️過熱(買われすぎ)")
 
                 score = max(0, min(100, score))
-
                 reason_str = "、".join(reasons) if reasons else "特になし"
+                
+                # 自動スクリーニングの足切り（新ロジックでは60点以上）
                 if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (score < 60 or "⚠️" in reason_str):
                     continue
                 
-                # 【新機能】抽出された銘柄にだけ追加で権利落ち日を取得
                 ex_div_txt = "-"
                 try:
                     info = yf.Ticker(ticker).info
@@ -313,6 +375,14 @@ if app_page == "🔍 銘柄スクリーニング":
                 except:
                     pass
                 
+                if score >= 80: rank_str = "★★★★★ 【S】強気買い"
+                elif score >= 60: rank_str = "★★★★☆ 【A】買いシグナル"
+                elif score >= 40: rank_str = "★★★☆☆ 【B】順張り"
+                elif rsi < 30: rank_str = "★★☆☆☆ 【特殊】逆張り狙い"
+                else: rank_str = "★☆☆☆☆ 【C】様子見"
+                
+                sig_txt = f"{rank_str}"
+
                 name = MAJOR_NAMES.get(code_str, code_str)
                 data_list.append({
                     "コード": code_str, 
@@ -320,9 +390,10 @@ if app_page == "🔍 銘柄スクリーニング":
                     "終値": round(c_c, 1), 
                     "スコア": score,
                     "主な要因・警告": reason_str,
-                    "権利落ち日": ex_div_txt, # 追加：権利落ち日の列
+                    "権利落ち日": ex_div_txt,
                     "上値余地": f"{round(dist_res, 1)}%", 
-                    "RSI": round(rsi, 1)
+                    "RSI": round(rsi, 1),
+                    "判定": sig_txt
                 })
             except: continue
                 
@@ -333,11 +404,13 @@ if app_page == "🔍 銘柄スクリーニング":
 
     if st.session_state.analysis_result:
         df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(by="スコア", ascending=False).reset_index(drop=True)
+        # 不要な列を隠す（表示用）
+        df_display = df_res.drop(columns=['判定'])
         
         st.subheader("① 買いシグナル スコア抽出結果")
         
         event = st.dataframe(
-            df_res, 
+            df_display, 
             use_container_width=True, 
             on_select="rerun", 
             selection_mode="single-row",
@@ -427,7 +500,7 @@ if app_page == "🔍 銘柄スクリーニング":
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
 # ==============================================================================
-# ページ2: 保 बुन्देल銘柄ポートフォリオ
+# ページ2: 保有銘柄ポートフォリオ
 # ==============================================================================
 elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
