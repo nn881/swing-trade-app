@@ -230,16 +230,15 @@ if app_page == "🔍 銘柄スクリーニング":
             progress_bar.progress((i + 1) / len(tickers_to_analyze))
             
             try:
-                # 75日線なども計算するため少し長めに取得
                 df = yf.Ticker(ticker).history(period="1y")
                 if df.empty or len(df) < 80: continue
                 
                 df['5MA'] = df['Close'].rolling(window=5).mean()
                 df['25MA'] = df['Close'].rolling(window=25).mean()
-                df['75MA'] = df['Close'].rolling(window=75).mean() # 新規: 長期線
+                df['75MA'] = df['Close'].rolling(window=75).mean()
                 df['Volume_5MA'] = df['Volume'].rolling(window=5).mean()
                 df['High_60'] = df['High'].rolling(window=60).max()
-                df['High_20'] = df['High'].rolling(window=20).max() # 新規: 20日高値
+                df['High_20'] = df['High'].rolling(window=20).max()
                 
                 c_c = df['Close'].iloc[-1]
                 c_5, c_25, c_75 = df['5MA'].iloc[-1], df['25MA'].iloc[-1], df['75MA'].iloc[-1]
@@ -260,21 +259,16 @@ if app_page == "🔍 銘柄スクリーニング":
                 is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
                 is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
                 
-                # ==================================================
-                # 💯 【新機能】100点満点のスコア採点システム
-                # ==================================================
                 score = 0
                 reasons = []
                 
-                # トレンド基盤（最大40点）
                 if c_c > c_25: score += 10
                 if c_5 > c_25: score += 10
                 if is_25ma_up: score += 10
                 if c_25 > c_75 and c_c > c_75:
-                    score += 10 # 新規: 長期トレンド追従
+                    score += 10
                     reasons.append("長期上昇")
 
-                # モメンタム・クロス判定（最大35点）
                 if is_gc_ma:
                     score += 20
                     reasons.append("MAクロス")
@@ -282,9 +276,8 @@ if app_page == "🔍 銘柄スクリーニング":
                     score += 15
                     reasons.append("MACD転換")
                     
-                # オシレーター・出来高・ブレイクアウト（最大45点）
                 if 50 <= rsi <= 75:
-                    score += 10 # 新規: 健全な上昇RSI
+                    score += 10
                 elif rsi < 30:
                     score += 15
                     reasons.append("売られすぎ水準")
@@ -294,10 +287,9 @@ if app_page == "🔍 銘柄スクリーニング":
                     reasons.append("出来高急増")
                     
                 if c_c >= df['High_20'].iloc[-2]:
-                    score += 10 # 新規: 高値ブレイクアウト
+                    score += 10
                     reasons.append("高値更新")
 
-                # リスク減点（ペナルティ）
                 if dist_res < 3.0:
                     score -= 20
                     reasons.append("⚠️上値抵抗線接近")
@@ -305,21 +297,30 @@ if app_page == "🔍 銘柄スクリーニング":
                     score -= 20
                     reasons.append("⚠️過熱(買われすぎ)")
 
-                # スコアを0〜100に丸める
                 score = max(0, min(100, score))
 
-                # 自動モードの場合はスコア60未満（または抵抗線警告あり）は除外
                 reason_str = "、".join(reasons) if reasons else "特になし"
                 if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (score < 60 or "⚠️" in reason_str):
                     continue
+                
+                # 【新機能】抽出された銘柄にだけ追加で権利落ち日を取得
+                ex_div_txt = "-"
+                try:
+                    info = yf.Ticker(ticker).info
+                    ex_ts = info.get('exDividendDate')
+                    if pd.notna(ex_ts) and ex_ts is not None:
+                        ex_div_txt = datetime.fromtimestamp(ex_ts).strftime("%Y/%m/%d")
+                except:
+                    pass
                 
                 name = MAJOR_NAMES.get(code_str, code_str)
                 data_list.append({
                     "コード": code_str, 
                     "銘柄名": name, 
                     "終値": round(c_c, 1), 
-                    "スコア": score, # 新規: 100点満点の数値
+                    "スコア": score,
                     "主な要因・警告": reason_str,
+                    "権利落ち日": ex_div_txt, # 追加：権利落ち日の列
                     "上値余地": f"{round(dist_res, 1)}%", 
                     "RSI": round(rsi, 1)
                 })
@@ -331,12 +332,10 @@ if app_page == "🔍 銘柄スクリーニング":
             st.session_state.selected_name = data_list[0]["銘柄名"]
 
     if st.session_state.analysis_result:
-        # スコアの高い順（降順）でソート
         df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(by="スコア", ascending=False).reset_index(drop=True)
         
         st.subheader("① 買いシグナル スコア抽出結果")
         
-        # 【新機能】プログレスバーによる視覚的なスコア表示
         event = st.dataframe(
             df_res, 
             use_container_width=True, 
@@ -349,7 +348,8 @@ if app_page == "🔍 銘柄スクリーニング":
                     format="%d点",
                     min_value=0,
                     max_value=100,
-                )
+                ),
+                "権利落ち日": st.column_config.TextColumn("直近の権利落ち日")
             }
         )
         
@@ -388,7 +388,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 df_c['MA_S'] = df_c['Close'].rolling(ma_s).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(ma_l).mean()
                 
-                # 追加：75日線（長期トレンド確認用。日足の場合のみ表示）
                 if tf_choice == "日足":
                     df_c['MA_75'] = df_c['Close'].rolling(75).mean()
                 
@@ -428,7 +427,7 @@ if app_page == "🔍 銘柄スクリーニング":
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
 # ==============================================================================
-# ページ2: 保有銘柄ポートフォリオ
+# ページ2: 保 बुन्देल銘柄ポートフォリオ
 # ==============================================================================
 elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
