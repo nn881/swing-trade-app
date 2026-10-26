@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
@@ -12,12 +13,19 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="スイング監視", layout="wide")
 
 # ==========================================
-# スマホ最適化 CSS
+# スマホ最適化 CSS ＆ JavaScript
 # ==========================================
+# ① タイトルが絶対に1行に収まるようにCSSを強化
 st.markdown("""
     <style>
     @media (max-width: 768px) {
-        h1 { font-size: 1.5rem !important; padding-bottom: 0px !important; }
+        h1 { 
+            font-size: min(1.2rem, 4.5vw) !important; 
+            white-space: nowrap !important; 
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            padding-bottom: 0px !important; 
+        }
     }
     div[data-testid="metric-container"] {
         background-color: rgba(255, 255, 255, 0.05);
@@ -36,6 +44,29 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
+# ② サイドバーの外側をタップした際に自動で閉じるJavaScriptを注入
+components.html(
+    """
+    <script>
+    const parentDoc = window.parent.document;
+    parentDoc.addEventListener('click', function(e) {
+        if (window.innerWidth <= 768) {
+            const sidebar = parentDoc.querySelector('[data-testid="stSidebar"]');
+            // クリックされた場所がサイドバーの外側の場合
+            if (sidebar && !sidebar.contains(e.target)) {
+                const closeBtn = sidebar.querySelector('button');
+                // サイドバーが開いている状態なら閉じるボタンを押す
+                if (closeBtn && sidebar.getAttribute('aria-expanded') === 'true') {
+                    closeBtn.click();
+                }
+            }
+        }
+    });
+    </script>
+    """,
+    height=0, width=0
+)
 
 MY_STOCKS = ["7974", "4751", "9101", "3990"]
 MAJOR_NAMES = {
@@ -108,7 +139,6 @@ def save_tickers(text):
 def load_portfolio():
     if os.path.exists(PORTFOLIO_FILE):
         df = pd.read_csv(PORTFOLIO_FILE, dtype={"コード": str, "取得日": str, "メモ (戦略など)": str})
-        # 【修正】空欄（NaN）が原因のエラーを防ぐため、強制的に空白や0に置き換える
         df = df.fillna({'コード': '', '取得日': '', '取得単価': 0.0, '保有株数': 0.0, 'メモ (戦略など)': ''})
         if '口座区分' in df.columns: df = df.drop(columns=['口座区分'])
         return df
@@ -134,6 +164,33 @@ if "show_portfolio_charts" not in st.session_state: st.session_state.show_portfo
 # ==========================================
 st.sidebar.header("📁 メニュー")
 app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄スクリーニング", "💼 保有銘柄ポートフォリオ"])
+
+st.sidebar.markdown("---")
+with st.sidebar.expander("💾 データのバックアップと復元"):
+    st.caption("サーバーのスリープ等でデータが初期化された場合、ここから復元できます。定期的にバックアップ（ダウンロード）を保存してください。")
+    
+    st.markdown("**📥 バックアップ（保存）**")
+    if os.path.exists(PORTFOLIO_FILE):
+        with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+            st.download_button("💼 ポートフォリオを保存 (.csv)", f.read(), file_name=PORTFOLIO_FILE, use_container_width=True)
+    if os.path.exists(TICKERS_FILE):
+        with open(TICKERS_FILE, "r", encoding="utf-8") as f:
+            st.download_button("🔍 監視リストを保存 (.txt)", f.read(), file_name=TICKERS_FILE, use_container_width=True)
+
+    st.markdown("**📂 復元（アップロード）**")
+    upload_port = st.file_uploader("ポートフォリオの復元", type=['csv'])
+    if upload_port:
+        with open(PORTFOLIO_FILE, "wb") as f:
+            f.write(upload_port.getbuffer())
+        st.session_state.portfolio_df = load_portfolio()
+        st.success("✅ 復元成功！画面をリロードしてください")
+        
+    upload_tick = st.file_uploader("監視リストの復元", type=['txt'])
+    if upload_tick:
+        with open(TICKERS_FILE, "wb") as f:
+            f.write(upload_tick.getbuffer())
+        st.session_state.manual_tickers = load_tickers()
+        st.success("✅ 復元成功！画面をリロードしてください")
 
 st.title("📈 スイングトレード監視ダッシュボード")
 
@@ -330,7 +387,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.subheader("💼 保有銘柄の管理")
     st.write("保有しているスイング銘柄を管理します。")
     
-    # 【修正1】エラーを防ぐため各列のデータ型を明示的に指定
     edited_df = st.data_editor(
         st.session_state.portfolio_df, 
         num_rows="dynamic", 
@@ -346,7 +402,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     
     need_auto_fetch_rerun = False
     for index, row in edited_df.iterrows():
-        # 【修正2】NaN（空欄エラー）の完全排除
         code = str(row.get('コード', '')).strip()
         if code.endswith('.0'): code = code[:-2]
         if code.lower() in ['nan', 'none']: code = ''
@@ -370,10 +425,8 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     need_auto_fetch_rerun = True
             except: pass
 
-    # 【修正3】ユーザーの入力中は強制リロードさせず、裏側でサイレントにファイル保存だけ行う
     save_portfolio(edited_df)
 
-    # 【修正3】自動取得でシステムが単価を書き換えた時のみ強制リロードを行う
     if need_auto_fetch_rerun:
         st.session_state.portfolio_df = edited_df
         st.rerun()
