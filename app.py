@@ -15,7 +15,6 @@ st.set_page_config(page_title="スイング監視", layout="wide")
 # ==========================================
 # スマホ最適化 CSS ＆ JavaScript
 # ==========================================
-# ① タイトルが絶対に1行に収まるようにCSSを強化
 st.markdown("""
     <style>
     @media (max-width: 768px) {
@@ -45,7 +44,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ② サイドバーの外側をタップした際に自動で閉じるJavaScriptを注入
 components.html(
     """
     <script>
@@ -53,10 +51,8 @@ components.html(
     parentDoc.addEventListener('click', function(e) {
         if (window.innerWidth <= 768) {
             const sidebar = parentDoc.querySelector('[data-testid="stSidebar"]');
-            // クリックされた場所がサイドバーの外側の場合
             if (sidebar && !sidebar.contains(e.target)) {
                 const closeBtn = sidebar.querySelector('button');
-                // サイドバーが開いている状態なら閉じるボタンを押す
                 if (closeBtn && sidebar.getAttribute('aria-expanded') === 'true') {
                     closeBtn.click();
                 }
@@ -234,15 +230,19 @@ if app_page == "🔍 銘柄スクリーニング":
             progress_bar.progress((i + 1) / len(tickers_to_analyze))
             
             try:
-                df = yf.Ticker(ticker).history(period="6mo")
-                if df.empty or len(df) < 60: continue
+                # 75日線なども計算するため少し長めに取得
+                df = yf.Ticker(ticker).history(period="1y")
+                if df.empty or len(df) < 80: continue
                 
                 df['5MA'] = df['Close'].rolling(window=5).mean()
                 df['25MA'] = df['Close'].rolling(window=25).mean()
+                df['75MA'] = df['Close'].rolling(window=75).mean() # 新規: 長期線
                 df['Volume_5MA'] = df['Volume'].rolling(window=5).mean()
                 df['High_60'] = df['High'].rolling(window=60).max()
+                df['High_20'] = df['High'].rolling(window=20).max() # 新規: 20日高値
                 
-                c_c, c_5, c_25 = df['Close'].iloc[-1], df['5MA'].iloc[-1], df['25MA'].iloc[-1]
+                c_c = df['Close'].iloc[-1]
+                c_5, c_25, c_75 = df['5MA'].iloc[-1], df['25MA'].iloc[-1], df['75MA'].iloc[-1]
                 p_5, p_25 = df['5MA'].iloc[-2], df['25MA'].iloc[-2]
                 
                 is_vol_surge = df['Volume'].iloc[-1] > (df['Volume_5MA'].iloc[-2] * 1.5)
@@ -256,54 +256,73 @@ if app_page == "🔍 銘柄スクリーニング":
                 sig = macd.ewm(span=9).mean()
                 
                 is_25ma_up = (c_25 >= p_25)
-                
                 is_gc_ma = (p_5 <= p_25) and (c_5 > c_25) and is_25ma_up
                 is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
                 is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
                 
+                # ==================================================
+                # 💯 【新機能】100点満点のスコア採点システム
+                # ==================================================
                 score = 0
-                base_txt = "シグナル無"
+                reasons = []
                 
-                if is_gc_ma and is_gc_macd:
-                    score = 4
-                    base_txt = "W好転"
-                elif is_gc_ma:
-                    score = 3
-                    base_txt = "MAクロス"
-                elif is_gc_macd and is_uptrend:
-                    score = 3
-                    base_txt = "MACD転換"
-                elif is_uptrend:
-                    score = 2
-                    base_txt = "上昇トレンド"
-                elif c_c < c_25 and rsi < 30:
-                    score = 1
-                    base_txt = "売られすぎ"
-                
-                badge = ""
-                if score >= 3:
-                    if dist_res < 3.0:
-                        score -= 1  
-                        badge = " ⚠️抵抗線接近"
-                    elif is_vol_surge:
-                        score += 1  
-                        badge = " 🔥出来高急増"
-                
-                score = max(0, min(5, score))
-                
-                if score >= 4: rank_str = "★★★★★ 【S】強気買い"
-                elif score == 3: rank_str = "★★★★☆ 【A】買いシグナル"
-                elif score == 2: rank_str = "★★★☆☆ 【B】順張り"
-                elif score == 1: rank_str = "★★☆☆☆ 【特殊】逆張り狙い"
-                else: rank_str = "★☆☆☆☆ 【C】様子見"
-                
-                sig_txt = f"{rank_str} ({base_txt}){badge}"
+                # トレンド基盤（最大40点）
+                if c_c > c_25: score += 10
+                if c_5 > c_25: score += 10
+                if is_25ma_up: score += 10
+                if c_25 > c_75 and c_c > c_75:
+                    score += 10 # 新規: 長期トレンド追従
+                    reasons.append("長期上昇")
 
-                if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (score < 2 or "⚠️" in sig_txt): 
+                # モメンタム・クロス判定（最大35点）
+                if is_gc_ma:
+                    score += 20
+                    reasons.append("MAクロス")
+                if is_gc_macd:
+                    score += 15
+                    reasons.append("MACD転換")
+                    
+                # オシレーター・出来高・ブレイクアウト（最大45点）
+                if 50 <= rsi <= 75:
+                    score += 10 # 新規: 健全な上昇RSI
+                elif rsi < 30:
+                    score += 15
+                    reasons.append("売られすぎ水準")
+                    
+                if is_vol_surge:
+                    score += 15
+                    reasons.append("出来高急増")
+                    
+                if c_c >= df['High_20'].iloc[-2]:
+                    score += 10 # 新規: 高値ブレイクアウト
+                    reasons.append("高値更新")
+
+                # リスク減点（ペナルティ）
+                if dist_res < 3.0:
+                    score -= 20
+                    reasons.append("⚠️上値抵抗線接近")
+                if rsi > 80:
+                    score -= 20
+                    reasons.append("⚠️過熱(買われすぎ)")
+
+                # スコアを0〜100に丸める
+                score = max(0, min(100, score))
+
+                # 自動モードの場合はスコア60未満（または抵抗線警告あり）は除外
+                reason_str = "、".join(reasons) if reasons else "特になし"
+                if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (score < 60 or "⚠️" in reason_str):
                     continue
                 
                 name = MAJOR_NAMES.get(code_str, code_str)
-                data_list.append({"コード": code_str, "銘柄名": name, "終値": round(c_c, 1), "上値余地": f"{round(dist_res, 1)}%", "RSI": round(rsi, 1), "判定": sig_txt})
+                data_list.append({
+                    "コード": code_str, 
+                    "銘柄名": name, 
+                    "終値": round(c_c, 1), 
+                    "スコア": score, # 新規: 100点満点の数値
+                    "主な要因・警告": reason_str,
+                    "上値余地": f"{round(dist_res, 1)}%", 
+                    "RSI": round(rsi, 1)
+                })
             except: continue
                 
         st.session_state.analysis_result = data_list
@@ -312,9 +331,28 @@ if app_page == "🔍 銘柄スクリーニング":
             st.session_state.selected_name = data_list[0]["銘柄名"]
 
     if st.session_state.analysis_result:
-        df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(['判定', 'RSI'], ascending=[True, True]).reset_index(drop=True)
-        st.subheader("① 買いシグナル抽出結果")
-        event = st.dataframe(df_res, use_container_width=True, on_select="rerun", selection_mode="single-row")
+        # スコアの高い順（降順）でソート
+        df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(by="スコア", ascending=False).reset_index(drop=True)
+        
+        st.subheader("① 買いシグナル スコア抽出結果")
+        
+        # 【新機能】プログレスバーによる視覚的なスコア表示
+        event = st.dataframe(
+            df_res, 
+            use_container_width=True, 
+            on_select="rerun", 
+            selection_mode="single-row",
+            column_config={
+                "スコア": st.column_config.ProgressColumn(
+                    "おすすめ度 (100点満点)",
+                    help="複合的なテクニカル指標から算出した総合スコア",
+                    format="%d点",
+                    min_value=0,
+                    max_value=100,
+                )
+            }
+        )
+        
         if event.selection.rows:
             st.session_state.selected_code = df_res.iloc[event.selection.rows[0]]["コード"]
             st.session_state.selected_name = df_res.iloc[event.selection.rows[0]]["銘柄名"]
@@ -349,6 +387,11 @@ if app_page == "🔍 銘柄スクリーニング":
             if not df_c.empty:
                 df_c['MA_S'] = df_c['Close'].rolling(ma_s).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(ma_l).mean()
+                
+                # 追加：75日線（長期トレンド確認用。日足の場合のみ表示）
+                if tf_choice == "日足":
+                    df_c['MA_75'] = df_c['Close'].rolling(75).mean()
+                
                 df_c['BB_std'] = df_c['Close'].rolling(ma_l).std()
                 df_c['BB_upper'], df_c['BB_lower'] = df_c['MA_L'] + (df_c['BB_std']*2), df_c['MA_L'] - (df_c['BB_std']*2)
                 
@@ -361,6 +404,10 @@ if app_page == "🔍 銘柄スクリーニング":
                 fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
+                
+                if tf_choice == "日足":
+                    fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_75'], mode='lines', name='75日線', line=dict(color='#ab63fa', width=1, dash='dot')), row=1, col=1)
+
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
                 
