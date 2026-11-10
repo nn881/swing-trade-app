@@ -97,19 +97,58 @@ def get_chart_data(code, tf_choice):
         df = yf.Ticker(code + ".T").history(period="5y", interval="1mo")
         return df, 12, 24, "12ヶ月線", "24ヶ月線"
     elif tf_choice == "5分足":
-        # 5分足の場合は長期間取得できないため、1ヶ月分を取得
         df = yf.Ticker(code + ".T").history(period="1mo", interval="5m")
+        # indexがタイムゾーン情報を持っている場合、扱いやすくするためTZを消去してローカル時間にする
+        if not df.empty and df.index.tz is not None:
+            df.index = df.index.tz_convert('Asia/Tokyo').tz_localize(None)
         return df, 25, 75, "25本線", "75本線"
     else:
         df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
-# 🛡️ 【修正】Yahoo!ファイナンスの仕様変更に対応した強力なスクレイピング
+# 📊 【新機能】X軸の表示形式を足種に合わせて最適化し、空白時間（夜間など）を詰める関数
+def apply_xaxis_formatting(fig, df, tf_choice):
+    if df.empty: return
+    
+    # 共通設定：スライダー非表示
+    fig.update_layout(xaxis_rangeslider_visible=False)
+
+    if tf_choice == "5分足":
+        # 5分ごとの目盛りに設定
+        fig.update_xaxes(
+            dtick=300000, # ミリ秒表記：5分 = 300,000ms
+            tickformat="%H:%M",
+            tickangle=-45,
+            # 夜間（15:00〜翌9:00）や昼休み、土日の空白を自動で詰める
+            rangebreaks=[
+                dict(bounds=["sat", "mon"]), # 土日カット
+                dict(bounds=[15, 9], pattern="hour"), # 15時から翌9時カット
+                dict(bounds=[11.5, 12.5], pattern="hour") # 11時半から12時半カット（昼休み）
+            ]
+        )
+    elif tf_choice == "日足":
+        fig.update_xaxes(
+            dtick="86400000", # 1日ごと
+            tickformat="%m/%d",
+            rangebreaks=[dict(bounds=["sat", "mon"])]
+        )
+    elif tf_choice == "週足":
+        fig.update_xaxes(
+            dtick="604800000", # 1週間ごと
+            tickformat="%Y-%m-%d"
+        )
+    elif tf_choice == "月足":
+        fig.update_xaxes(
+            dtick="M1", # 1ヶ月ごと
+            tickformat="%Y-%m"
+        )
+
+
 @st.cache_data(ttl=1800)
 def get_trend_stocks(ranking_type="up_rate"):
     urls = {
         "up_rate": "https://finance.yahoo.co.jp/ranking/up?opt=1",
-        "vol_surge": "https://finance.yahoo.co.jp/ranking/volume?opt=1", # 出来高上位に最適化
+        "vol_surge": "https://finance.yahoo.co.jp/ranking/volume?opt=1",
         "high_update": "https://finance.yahoo.co.jp/ranking/high?opt=1"
     }
     url = urls.get(ranking_type, urls["up_rate"])
@@ -123,7 +162,6 @@ def get_trend_stocks(ranking_type="up_rate"):
         res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 相対URLの仕様変更に対応した検索ロジック
         for a_tag in soup.find_all('a', href=re.compile(r'/quote/[0-9A-Za-z]{4}\.T')):
             href = a_tag.get('href')
             code_match = re.search(r'/quote/([0-9A-Za-z]{4})\.T', href, re.IGNORECASE)
@@ -131,7 +169,6 @@ def get_trend_stocks(ranking_type="up_rate"):
                 code = code_match.group(1).upper()
                 name = a_tag.get_text(strip=True)
                 
-                # 名前が空っぽだったり、コードの数字だったりした場合、親要素から探す
                 if not name or name == code:
                     tr = a_tag.find_parent('tr')
                     if tr:
@@ -501,7 +538,6 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        # 【修正】5分足の選択肢を追加（デフォルトは日足のまま）
         tf_choice = st.radio("チャート表示（足種切り替え）", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="screen_chart_tf")
         
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="1y")
@@ -528,7 +564,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
                 
-                # 【修正】日足だけでなく、5分足でも長期線（75本線）を描画する
                 if tf_choice in ["日足", "5分足"]:
                     ma_75_name = "75日線" if tf_choice == "日足" else "75本線"
                     df_c['MA_75'] = df_c['Close'].rolling(min(75, len(df_c))).mean()
@@ -541,7 +576,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
                 
-                # 【修正】5分足の時の利確・損切ライン延長用の時間を時間軸(hours)で計算
                 if tf_choice == "5分足":
                     f_date = df_c.index[-1] + timedelta(hours=5)
                 elif tf_choice == "日足":
@@ -565,7 +599,10 @@ if app_page == "🔍 銘柄スクリーニング":
                     fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
                     fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
-                fig.update_layout(xaxis_rangeslider_visible=False, height=650, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
+                fig.update_layout(height=650, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
+                # 📈 【追加】X軸の表示最適化処理を適用
+                apply_xaxis_formatting(fig, df_c, tf_choice)
+                
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
 # ==============================================================================
@@ -622,7 +659,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
-    # 【修正】ポートフォリオにも5分足の選択肢を追加
     port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="port_chart_tf")
     
     if st.button("🔄 最新の状況をチェックする", type="primary"):
@@ -693,7 +729,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)))
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)))
                     
-                    # 【修正】ポートフォリオでも日足と5分足なら75線を描画
                     if port_tf_choice in ["日足", "5分足"]:
                         ma_75_name = "75日線" if port_tf_choice == "日足" else "75本線"
                         df_p['MA_75'] = df_p['Close'].rolling(min(75, len(df_p))).mean()
@@ -704,7 +739,10 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                         fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right")
                         fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right")
 
-                    fig_p.update_layout(xaxis_rangeslider_visible=False, height=400, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10))
+                    fig_p.update_layout(height=400, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10))
+                    # 📈 【追加】ポートフォリオ側のチャートにもX軸最適化を適用
+                    apply_xaxis_formatting(fig_p, df_p, port_tf_choice)
+                    
                     st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
                 
                 st.markdown("---")
