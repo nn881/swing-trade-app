@@ -108,18 +108,17 @@ def get_trend_stocks(ranking_type="up_rate"):
         "high_update": "https://finance.yahoo.co.jp/ranking/highRate"
     }
     url = urls.get(ranking_type, urls["up_rate"])
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
     codes_and_names = []
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
-        
         for a_tag in soup.select('a[href^="https://finance.yahoo.co.jp/quote/"]'):
             href = a_tag['href']
-            code_match = re.search(r'/quote/(\d{4})\.T', href)
+            code_match = re.search(r'/quote/([0-9A-Za-z]{4})\.T', href)
             if code_match:
-                code = code_match.group(1)
+                code = code_match.group(1).upper()
                 name = a_tag.get_text(strip=True)
                 if code not in [item['code'] for item in codes_and_names]:
                     codes_and_names.append({"code": code, "name": name})
@@ -128,23 +127,21 @@ def get_trend_stocks(ranking_type="up_rate"):
         print(f"Scraping error: {e}")
     return codes_and_names
 
-# 🛡️ 【改良】証券コード直接入力時の強制データ取得対応
+# 🛡️ 【改良2】新証券コード（アルファベット入り）に完全対応！
 @st.cache_data(ttl=86400)
 def search_code_by_name(query):
-    query = str(query).strip()
+    query = str(query).strip().upper()
     
-    # 【改良ポイント】4桁の数字が入力された場合は、検索APIを介さず「証券コード」として確定させる
-    if re.match(r'^\d{4}$', query):
-        # 簡易的にyfinanceで存在チェックと会社名取得を試みる
+    # 4桁の英数字（例: 627A, 7974）なら無条件でコードとして受け入れる
+    if re.match(r'^[0-9A-Z]{4}$', query):
         try:
             info = yf.Ticker(query + ".T").info
-            name = info.get('shortName', query) # 会社名が取れなければコードを名前にする
+            name = info.get('shortName', query)
             if name: return query, name
         except:
-            # 取得に失敗しても強制的にコードとして返す（IPO直後などで情報が不足しているケースへの対応）
             return query, f"銘柄({query})"
     
-    # 企業名（文字列）が入力された場合は、これまで通り検索してコードを探す
+    # 企業名検索
     url = f"https://finance.yahoo.co.jp/search/?query={urllib.parse.quote(query)}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -152,19 +149,17 @@ def search_code_by_name(query):
         soup = BeautifulSoup(res.text, 'html.parser')
         first_result = soup.select_one('a[href^="https://finance.yahoo.co.jp/quote/"]')
         if first_result:
-            code_match = re.search(r'/quote/(\d{4})\.T', first_result['href'])
+            code_match = re.search(r'/quote/([0-9A-Z]{4})\.T', first_result['href'], re.IGNORECASE)
             if code_match:
                 name = first_result.get_text(strip=True)
-                return code_match.group(1), name
+                return code_match.group(1).upper(), name
     except: pass
     return None, None
 
 def calculate_score_and_technical(ticker):
     try:
-        # IPO銘柄など上場期間が短い場合に対応するため、取得期間を短め(6mo)に設定して許容する
         df = yf.Ticker(ticker).history(period="1y")
-        # 最低限のボリンジャーバンド（25日）が計算できるデータ数（約30日分）があれば分析を実行
-        if df.empty or len(df) < 30: return None
+        if df.empty or len(df) < 30: return None # データ不足時はNoneを返す
         
         df['5MA'] = df['Close'].rolling(window=5).mean()
         df['25MA'] = df['Close'].rolling(window=25).mean()
@@ -235,8 +230,7 @@ def calculate_score_and_technical(ticker):
         score = 0
         reasons = []
         
-        if is_po:
-            score += 20; reasons.append("✨PO形成")
+        if is_po: score += 20; reasons.append("✨PO形成")
         elif c_c > c_25 and c_5 > c_25 and is_25ma_up: score += 10
         if c_25 > c_75 and c_c > c_75: score += 5
             
@@ -274,7 +268,7 @@ def calculate_score_and_technical(ticker):
         return None
 
 # ==========================================
-# データの保存・読み込み（永続化機能）
+# データの保存・読み込み
 # ==========================================
 PORTFOLIO_FILE = "portfolio_data.csv"
 TICKERS_FILE = "manual_tickers_data.txt"
@@ -374,14 +368,14 @@ if app_page == "🔍 銘柄スクリーニング":
                     tickers_to_analyze = [{"code": t["code"]+".T", "name": t["name"]} for t in trend_list]
 
     elif search_mode == "🔍 特定の銘柄を深く分析 (フリーワード/コード検索)":
-        st.write("企業名（例: 竹内製作所）または証券コード（例: 4661）を入力して、100点満点の詳細分析を行います。IPO銘柄は4桁のコードを入力してください。")
-        search_query = st.text_input("企業名 または 証券コード (4桁)", placeholder="例: 4661")
+        st.write("企業名または証券コード（例: 627A）を入力してください。IPO・新コードにも対応しています。")
+        search_query = st.text_input("企業名 または 証券コード (4桁)", placeholder="例: 627A, 7974, 任天堂")
         
         if st.button("🔍 分析開始", type="primary") and search_query:
             with st.spinner("銘柄データを取得・分析中..."):
                 code, name = search_code_by_name(search_query)
                 if code:
-                    st.success(f"「{name} ({code})」のデータを取得しました。分析結果を表示します。")
+                    st.success(f"「{name} ({code})」のデータを取得しました。")
                     tickers_to_analyze = [{"code": code+".T", "name": name}]
                     run_analysis = True
                     is_strict_mode = False 
@@ -389,14 +383,14 @@ if app_page == "🔍 銘柄スクリーニング":
                     st.error("銘柄が見つかりませんでした。正式な企業名かコードを確認してください。")
 
     elif search_mode == "📝 いつもの監視リストをチェック":
-        st.write("手動で登録した銘柄コード（改行区切り）を一括で分析します。")
-        ticker_input = st.text_area("監視リスト (4桁コード)", value=st.session_state.manual_tickers, height=100)
+        st.write("手動で登録した銘柄コード（改行区切り、新コード対応）を一括で分析します。")
+        ticker_input = st.text_area("監視リスト (4桁の英数字コード)", value=st.session_state.manual_tickers, height=100)
         if ticker_input != st.session_state.manual_tickers:
             st.session_state.manual_tickers = ticker_input
             save_tickers(ticker_input)
             
         if st.button("▶️ リストを一括分析", type="primary"):
-            codes = [t.strip() for t in st.session_state.manual_tickers.split('\n') if t.strip()]
+            codes = [t.strip().upper() for t in st.session_state.manual_tickers.split('\n') if t.strip()]
             tickers_to_analyze = [{"code": c+".T", "name": c} for c in codes]
             if tickers_to_analyze: run_analysis = True
 
@@ -413,7 +407,18 @@ if app_page == "🔍 銘柄スクリーニング":
             progress_bar.progress((i + 1) / len(tickers_to_analyze))
             
             res = calculate_score_and_technical(ticker)
-            if not res: continue
+            
+            # 🚨 【超重要】IPOなどでデータ配信元の対応が遅れており、分析データが取得できない場合のフォールバック処理
+            if not res:
+                if not is_strict_mode: # 個別検索時のみ
+                    st.warning(f"⚠️ 「{name} ({code_str})」は上場直後のIPOであるか、データ配信元（Yahoo Finance US）の制限によりアプリ内でチャートを描画できません。")
+                    st.write("▼ 以下のボタンから、直接証券会社のチャートや発注画面へアクセスできます。")
+                    col_btn_a, col_btn_b = st.columns(2)
+                    rak_url = f"https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric={code_str}.t"
+                    yah_url = f"https://finance.yahoo.co.jp/quote/{code_str}.T"
+                    col_btn_a.link_button(f"🛒 {code_str}を楽天証券で確認・発注", rak_url, type="primary", use_container_width=True)
+                    col_btn_b.link_button(f"🔗 Yahoo!でチャートを確認", yah_url, use_container_width=True)
+                continue
             
             if is_strict_mode and (res["スコア"] < 60 or "⚠️" in res["主な要因・警告"]):
                 continue
@@ -441,8 +446,8 @@ if app_page == "🔍 銘柄スクリーニング":
         if data_list:
             st.session_state.selected_code = data_list[0]["コード"]
             st.session_state.selected_name = data_list[0]["銘柄名"]
-        else:
-            st.warning("条件を満たす強い銘柄は現在ありませんでした。（相場全体の地合いが悪い可能性があります）")
+        elif is_strict_mode:
+            st.info("現在、条件を満たす強い銘柄はありませんでした。（相場全体の地合いが悪い可能性があります）")
 
     # --- 結果表示・チャート描画フェーズ ---
     if st.session_state.analysis_result:
@@ -481,7 +486,6 @@ if app_page == "🔍 銘柄スクリーニング":
         
         tf_choice = st.radio("チャート表示（足種切り替え）", ["日足", "週足", "月足"], horizontal=True, key="screen_chart_tf")
         
-        # 上場間もないIPO株にも対応できるよう期間を1年分取得し、計算に必要な最低限のデータがあれば動かす
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="1y")
         if not df_daily.empty:
             tr = pd.concat([df_daily['High'] - df_daily['Low'], abs(df_daily['High'] - df_daily['Close'].shift()), abs(df_daily['Low'] - df_daily['Close'].shift())], axis=1).max(axis=1)
@@ -498,7 +502,6 @@ if app_page == "🔍 銘柄スクリーニング":
             df_c, ma_s, ma_l, name_s, name_l = get_chart_data(st.session_state.selected_code, tf_choice)
             
             if not df_c.empty:
-                # 取得期間が短くてもエラーにならないよう調整
                 df_c['MA_S'] = df_c['Close'].rolling(min(ma_s, len(df_c))).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(min(ma_l, len(df_c))).mean()
                 
@@ -556,7 +559,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
-            "コード": st.column_config.TextColumn("コード (4桁)"),
+            "コード": st.column_config.TextColumn("コード (4桁の英数字)"),
             "取得日": st.column_config.TextColumn("取得日 (YYYY/MM/DD)"),
             "取得単価": st.column_config.NumberColumn("取得単価", format="%g"),
             "保有株数": st.column_config.NumberColumn("保有株数", step=0.01, format="%g"),
@@ -566,7 +569,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     
     need_auto_fetch_rerun = False
     for index, row in edited_df.iterrows():
-        code = str(row.get('コード', '')).strip()
+        code = str(row.get('コード', '')).strip().upper()
         if code.endswith('.0'): code = code[:-2]
         if code.lower() in ['nan', 'none']: code = ''
             
@@ -608,7 +611,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
         total_current_value = 0.0
         
         for index, row in edited_df.iterrows():
-            code = str(row.get('コード', '')).strip()
+            code = str(row.get('コード', '')).strip().upper()
             if code.endswith('.0'): code = code[:-2]
             if not code or code.lower() in ['nan', 'none']: continue
             
@@ -617,13 +620,15 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             try: shares = float(row['保有株数'])
             except: shares = 0.0
                 
-            name = MAJOR_NAMES.get(code, code)
+            name = code
             st.markdown(f"### {code} {name}")
             
             try:
                 df_daily_p = yf.Ticker(code + ".T").history(period="6mo")
                 if df_daily_p.empty:
-                    st.error("データが取得できませんでした。")
+                    st.error(f"⚠️ {code}のデータが取得できませんでした（IPOなど）。")
+                    rak_url = f"https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric={code}.t"
+                    st.link_button(f"🛒 楽天証券で直接確認する", rak_url, use_container_width=True)
                     continue
                 
                 latest_price = df_daily_p['Close'].iloc[-1]
