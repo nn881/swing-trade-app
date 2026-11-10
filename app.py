@@ -96,30 +96,54 @@ def get_chart_data(code, tf_choice):
     elif tf_choice == "月足":
         df = yf.Ticker(code + ".T").history(period="5y", interval="1mo")
         return df, 12, 24, "12ヶ月線", "24ヶ月線"
+    elif tf_choice == "5分足":
+        # 5分足の場合は長期間取得できないため、1ヶ月分を取得
+        df = yf.Ticker(code + ".T").history(period="1mo", interval="5m")
+        return df, 25, 75, "25本線", "75本線"
     else:
         df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
+# 🛡️ 【修正】Yahoo!ファイナンスの仕様変更に対応した強力なスクレイピング
 @st.cache_data(ttl=1800)
 def get_trend_stocks(ranking_type="up_rate"):
     urls = {
         "up_rate": "https://finance.yahoo.co.jp/ranking/up?opt=1",
-        "vol_surge": "https://finance.yahoo.co.jp/ranking/volumeRapidIncrease",
-        "high_update": "https://finance.yahoo.co.jp/ranking/highRate"
+        "vol_surge": "https://finance.yahoo.co.jp/ranking/volume?opt=1", # 出来高上位に最適化
+        "high_update": "https://finance.yahoo.co.jp/ranking/high?opt=1"
     }
     url = urls.get(ranking_type, urls["up_rate"])
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'ja-JP,ja;q=0.9'
+    }
     
     codes_and_names = []
     try:
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
-        for a_tag in soup.select('a[href^="https://finance.yahoo.co.jp/quote/"]'):
-            href = a_tag['href']
-            code_match = re.search(r'/quote/([0-9A-Za-z]{4})\.T', href)
+        
+        # 相対URLの仕様変更に対応した検索ロジック
+        for a_tag in soup.find_all('a', href=re.compile(r'/quote/[0-9A-Za-z]{4}\.T')):
+            href = a_tag.get('href')
+            code_match = re.search(r'/quote/([0-9A-Za-z]{4})\.T', href, re.IGNORECASE)
             if code_match:
                 code = code_match.group(1).upper()
                 name = a_tag.get_text(strip=True)
+                
+                # 名前が空っぽだったり、コードの数字だったりした場合、親要素から探す
+                if not name or name == code:
+                    tr = a_tag.find_parent('tr')
+                    if tr:
+                        other_as = tr.find_all('a')
+                        for oa in other_as:
+                            txt = oa.get_text(strip=True)
+                            if txt and txt != code:
+                                name = txt
+                                break
+                if not name or name == code:
+                    name = f"銘柄({code})"
+                    
                 if code not in [item['code'] for item in codes_and_names]:
                     codes_and_names.append({"code": code, "name": name})
                 if len(codes_and_names) >= 50: break
@@ -127,12 +151,9 @@ def get_trend_stocks(ranking_type="up_rate"):
         print(f"Scraping error: {e}")
     return codes_and_names
 
-# 🛡️ 【改良2】新証券コード（アルファベット入り）に完全対応！
 @st.cache_data(ttl=86400)
 def search_code_by_name(query):
     query = str(query).strip().upper()
-    
-    # 4桁の英数字（例: 627A, 7974）なら無条件でコードとして受け入れる
     if re.match(r'^[0-9A-Z]{4}$', query):
         try:
             info = yf.Ticker(query + ".T").info
@@ -141,7 +162,6 @@ def search_code_by_name(query):
         except:
             return query, f"銘柄({query})"
     
-    # 企業名検索
     url = f"https://finance.yahoo.co.jp/search/?query={urllib.parse.quote(query)}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -159,7 +179,7 @@ def search_code_by_name(query):
 def calculate_score_and_technical(ticker):
     try:
         df = yf.Ticker(ticker).history(period="1y")
-        if df.empty or len(df) < 30: return None # データ不足時はNoneを返す
+        if df.empty or len(df) < 30: return None
         
         df['5MA'] = df['Close'].rolling(window=5).mean()
         df['25MA'] = df['Close'].rolling(window=25).mean()
@@ -264,7 +284,6 @@ def calculate_score_and_technical(ticker):
             "RSI": round(rsi, 1)
         }
     except Exception as e: 
-        print(f"Error analyzing {ticker}: {e}")
         return None
 
 # ==========================================
@@ -351,7 +370,7 @@ if app_page == "🔍 銘柄スクリーニング":
             if st.button("📈 値上がり率 トップ50", use_container_width=True):
                 ranking_choice, run_analysis = "up_rate", True
         with col2:
-            if st.button("📊 出来高急増 トップ50", use_container_width=True):
+            if st.button("📊 出来高上位 トップ50", use_container_width=True):
                 ranking_choice, run_analysis = "vol_surge", True
         with col3:
             if st.button("🚀 年初来高値更新 トップ50", use_container_width=True):
@@ -408,11 +427,9 @@ if app_page == "🔍 銘柄スクリーニング":
             
             res = calculate_score_and_technical(ticker)
             
-            # 🚨 【超重要】IPOなどでデータ配信元の対応が遅れており、分析データが取得できない場合のフォールバック処理
             if not res:
-                if not is_strict_mode: # 個別検索時のみ
-                    st.warning(f"⚠️ 「{name} ({code_str})」は上場直後のIPOであるか、データ配信元（Yahoo Finance US）の制限によりアプリ内でチャートを描画できません。")
-                    st.write("▼ 以下のボタンから、直接証券会社のチャートや発注画面へアクセスできます。")
+                if not is_strict_mode:
+                    st.warning(f"⚠️ 「{name} ({code_str})」は上場直後のIPOであるか、データ制限によりチャートを描画できません。")
                     col_btn_a, col_btn_b = st.columns(2)
                     rak_url = f"https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric={code_str}.t"
                     yah_url = f"https://finance.yahoo.co.jp/quote/{code_str}.T"
@@ -484,7 +501,8 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        tf_choice = st.radio("チャート表示（足種切り替え）", ["日足", "週足", "月足"], horizontal=True, key="screen_chart_tf")
+        # 【修正】5分足の選択肢を追加（デフォルトは日足のまま）
+        tf_choice = st.radio("チャート表示（足種切り替え）", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="screen_chart_tf")
         
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="1y")
         if not df_daily.empty:
@@ -505,40 +523,43 @@ if app_page == "🔍 銘柄スクリーニング":
                 df_c['MA_S'] = df_c['Close'].rolling(min(ma_s, len(df_c))).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(min(ma_l, len(df_c))).mean()
                 
-                if tf_choice == "日足":
-                    df_c['MA_75'] = df_c['Close'].rolling(min(75, len(df_c))).mean()
-                
-                df_c['BB_std'] = df_c['Close'].rolling(min(ma_l, len(df_c))).std()
-                df_c['BB_upper'] = df_c['MA_L'] + (df_c['BB_std']*2)
-                df_c['BB_lower'] = df_c['MA_L'] - (df_c['BB_std']*2)
-                
-                macd = df_c['Close'].ewm(span=12, adjust=False).mean() - df_c['Close'].ewm(span=26, adjust=False).mean()
-                sig = macd.ewm(span=9, adjust=False).mean()
-                
-                delta = df_c['Close'].diff()
-                rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
-                rsi = 100 - (100 / (1 + rs)).iloc[-1] if not pd.isna(rs.iloc[-1]) else 50
-
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
                 fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
                 
-                if tf_choice == "日足":
-                    fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_75'], mode='lines', name='75日線', line=dict(color='#ab63fa', width=1, dash='dot')), row=1, col=1)
+                # 【修正】日足だけでなく、5分足でも長期線（75本線）を描画する
+                if tf_choice in ["日足", "5分足"]:
+                    ma_75_name = "75日線" if tf_choice == "日足" else "75本線"
+                    df_c['MA_75'] = df_c['Close'].rolling(min(75, len(df_c))).mean()
+                    fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_75'], mode='lines', name=ma_75_name, line=dict(color='#ab63fa', width=1, dash='dot')), row=1, col=1)
 
+                df_c['BB_std'] = df_c['Close'].rolling(min(ma_l, len(df_c))).std()
+                df_c['BB_upper'] = df_c['MA_L'] + (df_c['BB_std']*2)
+                df_c['BB_lower'] = df_c['MA_L'] - (df_c['BB_std']*2)
+                
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
                 
-                f_days = 20 if tf_choice != "日足" else 5
-                f_date = df_c.index[-1] + timedelta(days=f_days)
+                # 【修正】5分足の時の利確・損切ライン延長用の時間を時間軸(hours)で計算
+                if tf_choice == "5分足":
+                    f_date = df_c.index[-1] + timedelta(hours=5)
+                elif tf_choice == "日足":
+                    f_date = df_c.index[-1] + timedelta(days=5)
+                else:
+                    f_date = df_c.index[-1] + timedelta(days=20)
+                    
                 fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
                 fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[stop_loss, stop_loss], mode='lines', name='損切ライン', line=dict(color='red', dash='dot')), row=1, col=1)
 
+                macd = df_c['Close'].ewm(span=12, adjust=False).mean() - df_c['Close'].ewm(span=26, adjust=False).mean()
+                sig = macd.ewm(span=9, adjust=False).mean()
                 fig.add_trace(go.Bar(x=df_c.index, y=macd-sig, name='MACD Hist', marker_color='gray'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=2, col=1)
 
+                delta = df_c['Close'].diff()
+                rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
                 if len(rsi_series := 100 - (100 / (1 + rs))) > 0:
                     fig.add_trace(go.Scatter(x=df_c.index, y=rsi_series, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
                     fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
@@ -601,7 +622,8 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
-    port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["日足", "週足", "月足"], horizontal=True, key="port_chart_tf")
+    # 【修正】ポートフォリオにも5分足の選択肢を追加
+    port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="port_chart_tf")
     
     if st.button("🔄 最新の状況をチェックする", type="primary"):
         st.session_state.show_portfolio_charts = True
@@ -670,6 +692,12 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)))
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)))
+                    
+                    # 【修正】ポートフォリオでも日足と5分足なら75線を描画
+                    if port_tf_choice in ["日足", "5分足"]:
+                        ma_75_name = "75日線" if port_tf_choice == "日足" else "75本線"
+                        df_p['MA_75'] = df_p['Close'].rolling(min(75, len(df_p))).mean()
+                        fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_75'], mode='lines', name=ma_75_name, line=dict(color='#ab63fa', width=1, dash='dot')))
                     
                     if entry_price > 0:
                         fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left")
