@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 import re
 import os
 from datetime import datetime, timedelta
+import urllib.parse
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
@@ -64,27 +65,8 @@ components.html(
     height=0, width=0
 )
 
-MY_STOCKS = ["7974", "4751", "9101", "3990"]
-MAJOR_NAMES = {
-    "2002": "日清製粉G", "2267": "ヤクルト", "2269": "明治HD", "2282": "日本ハム", "2502": "アサヒG", "2503": "キリンHD", "2801": "キッコーマン", "2802": "味の素", "2914": "JT",
-    "3402": "東レ", "3407": "旭化成", "4005": "住友化学", "4021": "日産化学", "4061": "デンカ", "4063": "信越化学工業", "4183": "三井化学", "4188": "三菱ケミカルG", "4452": "花王", "4901": "富士フイルム", "4911": "資生堂", "8113": "ユニ・チャーム",
-    "4502": "武田薬品工業", "4503": "アステラス製薬", "4507": "塩野義製薬", "4519": "中外製薬", "4523": "エーザイ", "4528": "小野薬品工業", "4568": "第一三共", "4578": "大塚HD",
-    "5019": "出光興産", "5020": "ENEOS", "5201": "AGC", "5332": "TOTO", "5333": "日本ガイシ", "5401": "日本製鉄", "5411": "JFE", "5713": "住友金属鉱山", "5714": "DOWA", "5802": "住友電工",
-    "6273": "SMC", "6301": "コマツ", "6326": "クボタ", "6367": "ダイキン工業", "6432": "竹内製作所", "6481": "THK", "7011": "三菱重工", "7012": "川崎重工", "7013": "IHI",
-    "6146": "ディスコ", "6501": "日立製作所", "6503": "三菱電機", "6504": "富士電機", "6506": "安川電機", "6594": "ニデック", "6645": "オムロン", "6702": "富士通", "6723": "ルネサス", "6752": "パナソニック", "6758": "ソニーG", "6762": "TDK", "6857": "アドバンテスト", "6861": "キーエンス", "6902": "デンソー", "6920": "レーザーテック", "6954": "ファナック", "6971": "京セラ", "6981": "村田製作所", "7733": "オリンパス", "7741": "HOYA", "7751": "キヤノン", "8035": "東京エレクトロン",
-    "7201": "日産自動車", "7202": "いすゞ", "7203": "トヨタ自動車", "7259": "アイシン", "7267": "ホンダ", "7269": "スズキ", "7270": "SUBARU", "7272": "ヤマハ発動機",
-    "2768": "双日", "8001": "伊藤忠商事", "8002": "丸紅", "8015": "豊田通商", "8031": "三井物産", "8053": "住友商事", "8058": "三菱商事",
-    "3086": "Jフロント", "3092": "ZOZO", "3382": "セブン＆アイ", "3659": "ネクソン", "4307": "野村総研", "4324": "電通G", "4661": "オリエンタルランド", "4704": "トレンドマイクロ", "4751": "サイバーエージェント", "6098": "リクルート", "7532": "パンパシフィック", "7974": "任天堂", "8252": "丸井G", "8267": "イオン", "9432": "NTT", "9433": "KDDI", "9434": "ソフトバンク", "9613": "NTTデータ", "9735": "セコム", "9843": "ニトリ", "9983": "ファーストリテイリング", "9984": "ソフトバンクG",
-    "8306": "三菱UFJ", "8308": "りそな", "8309": "三井住友トラスト", "8316": "三井住友", "8411": "みずほ", "8591": "オリックス", "8604": "野村HD", "8630": "SOMPO", "8725": "MS&AD", "8750": "第一生命", "8766": "東京海上",
-    "1801": "大成建設", "1802": "大林組", "1803": "清水建設", "1812": "鹿島", "1925": "大和ハウス", "1928": "積水ハウス", "3289": "東急不動産", "8801": "三井不動産", "8802": "三菱地所", "8804": "東京建物", "8830": "住友不動産",
-    "9501": "東京電力HD", "9502": "中部電力", "9503": "関西電力", "9531": "東京ガス", "9532": "大阪ガス",
-    "9020": "JR東日本", "9021": "JR西日本", "9022": "JR東海", "9101": "日本郵船", "9104": "商船三井", "9107": "川崎汽船", "9143": "SGHD", "9147": "NIPPON EXPRESS", "9201": "JAL", "9202": "ANA",
-    "7911": "TOPPAN", "7912": "大日本印刷", "7936": "アシックス", "7951": "ヤマハ"
-}
-TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
-
 # ==========================================
-# ユーティリティ・アラート関数
+# ユーティリティ・アラート・データ取得関数
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_earnings_date(code):
@@ -118,6 +100,158 @@ def get_chart_data(code, tf_choice):
         df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
+# 🌐 【新機能】Yahoo!ランキングから今アツい銘柄をスクレイピング
+@st.cache_data(ttl=1800) # 30分キャッシュ
+def get_trend_stocks(ranking_type="up_rate"):
+    urls = {
+        "up_rate": "https://finance.yahoo.co.jp/ranking/up?opt=1", # 値上がり率
+        "vol_surge": "https://finance.yahoo.co.jp/ranking/volumeRapidIncrease", # 出来高急増
+        "high_update": "https://finance.yahoo.co.jp/ranking/highRate" # 年初来高値更新率
+    }
+    url = urls.get(ranking_type, urls["up_rate"])
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    
+    codes_and_names = []
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # ランク表から銘柄コードと名前を抽出 (上位50件まで)
+        for a_tag in soup.select('a[href^="https://finance.yahoo.co.jp/quote/"]'):
+            href = a_tag['href']
+            code_match = re.search(r'/quote/(\d{4})\.T', href)
+            if code_match:
+                code = code_match.group(1)
+                name = a_tag.get_text(strip=True)
+                if code not in [item['code'] for item in codes_and_names]:
+                    codes_and_names.append({"code": code, "name": name})
+                if len(codes_and_names) >= 50: break
+    except Exception as e:
+        print(f"Scraping error: {e}")
+    return codes_and_names
+
+# 🔍 【新機能】企業名から証券コードを検索
+@st.cache_data(ttl=86400)
+def search_code_by_name(query):
+    # 4桁の数字ならそのまま返す
+    if re.match(r'^\d{4}$', query.strip()):
+        return query.strip(), query.strip()
+    
+    url = f"https://finance.yahoo.co.jp/search/?query={urllib.parse.quote(query.strip())}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        # 検索結果の1番目を抽出
+        first_result = soup.select_one('a[href^="https://finance.yahoo.co.jp/quote/"]')
+        if first_result:
+            code_match = re.search(r'/quote/(\d{4})\.T', first_result['href'])
+            if code_match:
+                name = first_result.get_text(strip=True)
+                return code_match.group(1), name
+    except: pass
+    return None, None
+
+# 💯 【新機能】100点満点スコアリングエンジン
+def calculate_score_and_technical(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="1y")
+        if df.empty or len(df) < 80: return None
+        
+        df['5MA'] = df['Close'].rolling(window=5).mean()
+        df['25MA'] = df['Close'].rolling(window=25).mean()
+        df['75MA'] = df['Close'].rolling(window=75).mean()
+        df['Volume_5MA'] = df['Volume'].rolling(window=5).mean()
+        df['High_60'] = df['High'].rolling(window=60).max()
+        df['High_20'] = df['High'].rolling(window=20).max()
+        
+        df['BB_std'] = df['Close'].rolling(window=25).std()
+        df['BB_upper'] = df['25MA'] + (df['BB_std'] * 2)
+        df['BB_lower'] = df['25MA'] - (df['BB_std'] * 2)
+        df['BB_width'] = df['BB_upper'] - df['BB_lower']
+        
+        high_9, low_9 = df['High'].rolling(9).max(), df['Low'].rolling(9).min()
+        df['Tenkan'] = (high_9 + low_9) / 2
+        high_26, low_26 = df['High'].rolling(26).max(), df['Low'].rolling(26).min()
+        df['Kijun'] = (high_26 + low_26) / 2
+        df['Senkou_A'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(25)
+        high_52, low_52 = df['High'].rolling(52).max(), df['Low'].rolling(52).min()
+        df['Senkou_B'] = ((high_52 + low_52) / 2).shift(25)
+        
+        c_c = df['Close'].iloc[-1]
+        c_5, c_25, c_75 = df['5MA'].iloc[-1], df['25MA'].iloc[-1], df['75MA'].iloc[-1]
+        p_5, p_25, p_75 = df['5MA'].iloc[-2], df['25MA'].iloc[-2], df['75MA'].iloc[-2]
+        
+        is_vol_surge = df['Volume'].iloc[-1] > (df['Volume_5MA'].iloc[-2] * 1.5)
+        dist_res = ((df['High_60'].iloc[-1] - c_c) / c_c) * 100
+        
+        delta = df['Close'].diff()
+        rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        
+        macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+        sig = macd.ewm(span=9).mean()
+        
+        is_25ma_up = (c_25 >= p_25)
+        is_gc_ma = (p_5 <= p_25) and (c_5 > c_25) and is_25ma_up
+        is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
+        
+        is_po = (c_5 > c_25 > c_75) and (c_5 >= p_5) and (c_25 >= p_25) and (c_75 >= p_75)
+        is_bb_exp = df['BB_width'].iloc[-1] > (df['BB_width'].iloc[-5] * 1.1)
+        is_bandwalk = is_bb_exp and (c_c >= (c_25 + df['BB_std'].iloc[-1]))
+        
+        # 日経平均の簡易比較（ここだけ同期的に取得すると重いので、簡易的に直近の上昇率のみで加点）
+        stock_5d_ret = (c_c - df['Close'].iloc[-6]) / df['Close'].iloc[-6]
+        
+        senkou_max = max(df['Senkou_A'].iloc[-1], df['Senkou_B'].iloc[-1])
+        p_senkou_max = max(df['Senkou_A'].iloc[-2], df['Senkou_B'].iloc[-2])
+        is_above_cloud = c_c > senkou_max
+        is_cloud_breakout = is_above_cloud and (df['Close'].iloc[-2] <= p_senkou_max)
+        is_tenkan_above_kijun = df['Tenkan'].iloc[-1] > df['Kijun'].iloc[-1]
+        is_chikou_above = c_c > df['Close'].iloc[-26] if len(df) >= 26 else False
+        is_sanyaku = is_above_cloud and is_tenkan_above_kijun and is_chikou_above
+        
+        score = 0
+        reasons = []
+        
+        if is_po:
+            score += 20; reasons.append("✨PO形成")
+        elif c_c > c_25 and c_5 > c_25 and is_25ma_up: score += 10
+        if c_25 > c_75 and c_c > c_75: score += 5
+            
+        if is_gc_ma: score += 15; reasons.append("MAクロス")
+        if is_gc_macd: score += 15; reasons.append("MACD転換")
+            
+        if is_bandwalk: score += 15; reasons.append("🚀バンドウォーク")
+        if stock_5d_ret > 0.05: score += 10; reasons.append("💪強いモメンタム")
+            
+        if is_sanyaku: score += 15; reasons.append("☀️三役好転")
+        elif is_cloud_breakout: score += 10; reasons.append("☁️雲抜け")
+            
+        if 50 <= rsi <= 75: score += 10
+        elif rsi < 30: score += 15; reasons.append("売られすぎ")
+            
+        if is_vol_surge: score += 10; reasons.append("出来高急増")
+        if c_c >= df['High_20'].iloc[-2]: score += 10; reasons.append("高値更新")
+
+        if dist_res < 3.0: score -= 20; reasons.append("⚠️抵抗線接近")
+        if rsi > 80: score -= 20; reasons.append("⚠️買われすぎ")
+
+        score = max(0, min(100, score))
+        reason_str = "、".join(reasons) if reasons else "特になし"
+        
+        return {
+            "終値": round(c_c, 1), 
+            "スコア": score,
+            "主な要因・警告": reason_str,
+            "上値余地": f"{round(dist_res, 1)}%", 
+            "RSI": round(rsi, 1)
+        }
+    except: return None
+
+# ==========================================
+# データの保存・読み込み（永続化機能）
+# ==========================================
 PORTFOLIO_FILE = "portfolio_data.csv"
 TICKERS_FILE = "manual_tickers_data.txt"
 
@@ -125,7 +259,6 @@ def load_tickers():
     if os.path.exists(TICKERS_FILE):
         with open(TICKERS_FILE, "r", encoding="utf-8") as f: return f.read()
     return ""
-
 def save_tickers(text):
     with open(TICKERS_FILE, "w", encoding="utf-8") as f: f.write(text)
 
@@ -135,15 +268,10 @@ def load_portfolio():
         df = df.fillna({'コード': '', '取得日': '', '取得単価': 0.0, '保有株数': 0.0, 'メモ (戦略など)': ''})
         if '口座区分' in df.columns: df = df.drop(columns=['口座区分'])
         return df
-    
     return pd.DataFrame({
-        "コード": pd.Series(dtype='str'),
-        "取得日": pd.Series(dtype='str'),
-        "取得単価": pd.Series(dtype='float'),
-        "保有株数": pd.Series(dtype='float'),
-        "メモ (戦略など)": pd.Series(dtype='str')
+        "コード": pd.Series(dtype='str'), "取得日": pd.Series(dtype='str'),
+        "取得単価": pd.Series(dtype='float'), "保有株数": pd.Series(dtype='float'), "メモ (戦略など)": pd.Series(dtype='str')
     })
-
 def save_portfolio(df):
     df.to_csv(PORTFOLIO_FILE, index=False)
 
@@ -160,9 +288,7 @@ app_page = st.sidebar.radio("機能を選択してください", ["🔍 銘柄�
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("💾 データのバックアップと復元"):
-    st.caption("サーバーのスリープ等でデータが初期化された場合、ここから復元できます。定期的にバックアップ（ダウンロード）を保存してください。")
-    
-    st.markdown("**📥 バックアップ（保存）**")
+    st.caption("サーバーのスリープ等でデータが初期化された場合、ここから復元できます。")
     if os.path.exists(PORTFOLIO_FILE):
         with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
             st.download_button("💼 ポートフォリオを保存 (.csv)", f.read(), file_name=PORTFOLIO_FILE, use_container_width=True)
@@ -170,247 +296,137 @@ with st.sidebar.expander("💾 データのバックアップと復元"):
         with open(TICKERS_FILE, "r", encoding="utf-8") as f:
             st.download_button("🔍 監視リストを保存 (.txt)", f.read(), file_name=TICKERS_FILE, use_container_width=True)
 
-    st.markdown("**📂 復元（アップロード）**")
     upload_port = st.file_uploader("ポートフォリオの復元", type=['csv'])
     if upload_port:
-        with open(PORTFOLIO_FILE, "wb") as f:
-            f.write(upload_port.getbuffer())
+        with open(PORTFOLIO_FILE, "wb") as f: f.write(upload_port.getbuffer())
         st.session_state.portfolio_df = load_portfolio()
-        st.success("✅ 復元成功！画面をリロードしてください")
-        
-    upload_tick = st.file_uploader("監視リストの復元", type=['txt'])
-    if upload_tick:
-        with open(TICKERS_FILE, "wb") as f:
-            f.write(upload_tick.getbuffer())
-        st.session_state.manual_tickers = load_tickers()
         st.success("✅ 復元成功！画面をリロードしてください")
 
 st.title("📈 スイングトレード監視ダッシュボード")
-
 rights_warning = check_rights_date_warning()
 if rights_warning: st.warning(rights_warning)
 
 # ==============================================================================
-# ページ1: 銘柄スクリーニング
+# ページ1: 銘柄スクリーニング (大改造)
 # ==============================================================================
 if app_page == "🔍 銘柄スクリーニング":
-    st.sidebar.markdown("---")
-    st.sidebar.header("⚙️ 動作モード")
-    mode = st.sidebar.radio("モードを選択", ["手動監視モード", "🤖 注目・主要銘柄 自動スクリーニング"], index=1)
+    st.markdown("### どのような方法で銘柄を探しますか？")
+    
+    search_mode = st.radio("スクリーニング手法", 
+                           ["🔥 今日のトレンド株を発掘 (ランキング連携)", 
+                            "🔍 特定の銘柄を深く分析 (フリーワード/コード検索)",
+                            "📝 いつもの監視リストをチェック"], 
+                           horizontal=True, label_visibility="collapsed")
     
     tickers_to_analyze = []
     run_analysis = False
+    is_strict_mode = True # トレンドモードや監視リストは足切り(60点)を行う
     
-    if mode == "手動監視モード":
-        st.sidebar.write("監視したい銘柄コードを**改行**で入力してください")
-        ticker_input = st.sidebar.text_area("銘柄コード", value=st.session_state.manual_tickers, height=150)
+    st.markdown("---")
+    
+    if search_mode == "🔥 今日のトレンド株を発掘 (ランキング連携)":
+        st.write("Yahoo!ファイナンスのランキングから、今市場で注目されている上位銘柄（IPO含む全銘柄対象）を自動で引っ張ってきて、スコアリングにかけます。")
+        col1, col2, col3 = st.columns(3)
+        ranking_choice = "up_rate"
         
+        with col1:
+            if st.button("📈 値上がり率 トップ50", use_container_width=True):
+                ranking_choice, run_analysis = "up_rate", True
+        with col2:
+            if st.button("📊 出来高急増 トップ50", use_container_width=True):
+                ranking_choice, run_analysis = "vol_surge", True
+        with col3:
+            if st.button("🚀 年初来高値更新 トップ50", use_container_width=True):
+                ranking_choice, run_analysis = "high_update", True
+                
+        if run_analysis:
+            with st.spinner("市場データを収集中..."):
+                trend_list = get_trend_stocks(ranking_choice)
+                if not trend_list:
+                    st.error("データの取得に失敗しました。時間をおいて再試行してください。")
+                    run_analysis = False
+                else:
+                    st.success(f"{len(trend_list)}銘柄を抽出しました。スコアリングを開始します...")
+                    tickers_to_analyze = [{"code": t["code"]+".T", "name": t["name"]} for t in trend_list]
+
+    elif search_mode == "🔍 特定の銘柄を深く分析 (フリーワード/コード検索)":
+        st.write("企業名（例: 竹内製作所、ソニー）または証券コードを入力して、100点満点の詳細分析を行います。全上場銘柄に対応しています。")
+        search_query = st.text_input("企業名 または 証券コード (4桁)", placeholder="例: オリエンタルランド、4661")
+        if st.button("🔍 分析開始", type="primary") and search_query:
+            with st.spinner("銘柄を検索中..."):
+                code, name = search_code_by_name(search_query)
+                if code:
+                    st.success(f"「{name} ({code})」を発見しました。分析を開始します...")
+                    tickers_to_analyze = [{"code": code+".T", "name": name}]
+                    run_analysis = True
+                    is_strict_mode = False # 個別検索は点数が低くても必ず表示する
+                else:
+                    st.error("銘柄が見つかりませんでした。正式な企業名かコードを確認してください。")
+
+    elif search_mode == "📝 いつもの監視リストをチェック":
+        st.write("手動で登録した銘柄コード（改行区切り）を一括で分析します。")
+        ticker_input = st.text_area("監視リスト (4桁コード)", value=st.session_state.manual_tickers, height=100)
         if ticker_input != st.session_state.manual_tickers:
             st.session_state.manual_tickers = ticker_input
             save_tickers(ticker_input)
             
-        tickers_to_analyze = [t.strip() + ".T" for t in st.session_state.manual_tickers.split('\n') if t.strip()]
-        if tickers_to_analyze: run_analysis = True
-    else:
-        st.sidebar.success(f"主要銘柄（計{len(TARGET_STOCKS)}社）から自動抽出します。")
-        if st.sidebar.button("▶️ スクリーニング開始"):
-            tickers_to_analyze = [t + ".T" for t in TARGET_STOCKS]
-            run_analysis = True
+        if st.button("▶️ リストを一括分析", type="primary"):
+            codes = [t.strip() for t in st.session_state.manual_tickers.split('\n') if t.strip()]
+            tickers_to_analyze = [{"code": c+".T", "name": c} for c in codes]
+            if tickers_to_analyze: run_analysis = True
 
+    # --- スコアリング実行フェーズ ---
     if run_analysis and tickers_to_analyze:
-        st.subheader("① 買いシグナル抽出結果")
+        st.markdown("### ① 買いシグナル抽出結果")
         progress_bar = st.progress(0)
         data_list = []
         
-        # 🌐 【新機能】日経平均のパフォーマンスを事前取得（RS判定用）
-        nikkei_5d_ret = 0.0
-        try:
-            nikkei_df = yf.Ticker("^N225").history(period="1mo")
-            if not nikkei_df.empty and len(nikkei_df) >= 6:
-                nikkei_5d_ret = (nikkei_df['Close'].iloc[-1] - nikkei_df['Close'].iloc[-6]) / nikkei_df['Close'].iloc[-6]
-        except: pass
-        
-        for i, ticker in enumerate(tickers_to_analyze):
+        for i, item in enumerate(tickers_to_analyze):
+            ticker = item["code"]
             code_str = ticker.replace('.T', '')
+            name = item["name"]
             progress_bar.progress((i + 1) / len(tickers_to_analyze))
             
+            res = calculate_score_and_technical(ticker)
+            if not res: continue
+            
+            # 足切りロジック (個別検索以外は、スコア60未満 または 警告ありを除外)
+            if is_strict_mode and (res["スコア"] < 60 or "⚠️" in res["主な要因・警告"]):
+                continue
+            
+            # 抽出されたものだけ権利落ち日を取得
+            ex_div_txt = "-"
             try:
-                df = yf.Ticker(ticker).history(period="1y")
-                if df.empty or len(df) < 80: continue
-                
-                # 移動平均・ボリンジャーバンド
-                df['5MA'] = df['Close'].rolling(window=5).mean()
-                df['25MA'] = df['Close'].rolling(window=25).mean()
-                df['75MA'] = df['Close'].rolling(window=75).mean()
-                df['Volume_5MA'] = df['Volume'].rolling(window=5).mean()
-                df['High_60'] = df['High'].rolling(window=60).max()
-                df['High_20'] = df['High'].rolling(window=20).max()
-                
-                df['BB_std'] = df['Close'].rolling(window=25).std()
-                df['BB_upper'] = df['25MA'] + (df['BB_std'] * 2)
-                df['BB_lower'] = df['25MA'] - (df['BB_std'] * 2)
-                df['BB_width'] = df['BB_upper'] - df['BB_lower']
-                
-                # 一目均衡表
-                high_9, low_9 = df['High'].rolling(9).max(), df['Low'].rolling(9).min()
-                df['Tenkan'] = (high_9 + low_9) / 2
-                high_26, low_26 = df['High'].rolling(26).max(), df['Low'].rolling(26).min()
-                df['Kijun'] = (high_26 + low_26) / 2
-                df['Senkou_A'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(25)
-                high_52, low_52 = df['High'].rolling(52).max(), df['Low'].rolling(52).min()
-                df['Senkou_B'] = ((high_52 + low_52) / 2).shift(25)
-                
-                c_c = df['Close'].iloc[-1]
-                c_5, c_25, c_75 = df['5MA'].iloc[-1], df['25MA'].iloc[-1], df['75MA'].iloc[-1]
-                p_5, p_25, p_75 = df['5MA'].iloc[-2], df['25MA'].iloc[-2], df['75MA'].iloc[-2]
-                
-                is_vol_surge = df['Volume'].iloc[-1] > (df['Volume_5MA'].iloc[-2] * 1.5)
-                dist_res = ((df['High_60'].iloc[-1] - c_c) / c_c) * 100
-                
-                delta = df['Close'].diff()
-                rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
-                rsi = 100 - (100 / (1 + rs)).iloc[-1]
-                
-                macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-                sig = macd.ewm(span=9).mean()
-                
-                # トレンド判定
-                is_25ma_up = (c_25 >= p_25)
-                is_gc_ma = (p_5 <= p_25) and (c_5 > c_25) and is_25ma_up
-                is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
-                is_uptrend = (c_c > c_25) and (c_5 > c_25) and is_25ma_up
-                
-                # 新判定：パーフェクトオーダー
-                is_po = (c_5 > c_25 > c_75) and (c_5 >= p_5) and (c_25 >= p_25) and (c_75 >= p_75)
-                
-                # 新判定：バンドウォーク初動
-                is_bb_exp = df['BB_width'].iloc[-1] > (df['BB_width'].iloc[-5] * 1.1)
-                is_bandwalk = is_bb_exp and (c_c >= (c_25 + df['BB_std'].iloc[-1])) # +1σ以上
-                
-                # 新判定：対日経相対強度 (RS)
-                stock_5d_ret = (c_c - df['Close'].iloc[-6]) / df['Close'].iloc[-6]
-                is_rs_strong = (stock_5d_ret > 0) and (stock_5d_ret > nikkei_5d_ret + 0.03) # 日経より3%以上強い
-                
-                # 新判定：一目均衡表 雲抜け・三役好転
-                senkou_max = max(df['Senkou_A'].iloc[-1], df['Senkou_B'].iloc[-1])
-                p_senkou_max = max(df['Senkou_A'].iloc[-2], df['Senkou_B'].iloc[-2])
-                is_above_cloud = c_c > senkou_max
-                is_cloud_breakout = is_above_cloud and (df['Close'].iloc[-2] <= p_senkou_max)
-                is_tenkan_above_kijun = df['Tenkan'].iloc[-1] > df['Kijun'].iloc[-1]
-                is_chikou_above = c_c > df['Close'].iloc[-26] if len(df) >= 26 else False
-                is_sanyaku = is_above_cloud and is_tenkan_above_kijun and is_chikou_above
-                
-                # ==================================================
-                # 💯 総合スコアリングロジック (Max 100+)
-                # ==================================================
-                score = 0
-                reasons = []
-                
-                # ベースの強さ
-                if is_po:
-                    score += 20
-                    reasons.append("✨パーフェクトオーダー")
-                elif c_c > c_25 and c_5 > c_25 and is_25ma_up:
-                    score += 10
-                    
-                if c_25 > c_75 and c_c > c_75:
-                    score += 5
-                    
-                # シグナル
-                if is_gc_ma:
-                    score += 15
-                    reasons.append("MAクロス")
-                if is_gc_macd:
-                    score += 15
-                    reasons.append("MACD転換")
-                    
-                # 特殊テクニカル
-                if is_bandwalk:
-                    score += 15
-                    reasons.append("🚀バンドウォーク")
-                if is_rs_strong:
-                    score += 10
-                    reasons.append("💪対日経強勢")
-                if is_sanyaku:
-                    score += 15
-                    reasons.append("☀️三役好転(一目)")
-                elif is_cloud_breakout:
-                    score += 10
-                    reasons.append("☁️雲抜け(一目)")
-                    
-                if 50 <= rsi <= 75:
-                    score += 10
-                elif rsi < 30:
-                    score += 15
-                    reasons.append("売られすぎ水準")
-                    
-                if is_vol_surge:
-                    score += 10
-                    reasons.append("出来高急増")
-                if c_c >= df['High_20'].iloc[-2]:
-                    score += 10
-                    reasons.append("高値更新")
-
-                # リスク減点
-                if dist_res < 3.0:
-                    score -= 20
-                    reasons.append("⚠️上値抵抗線接近")
-                if rsi > 80:
-                    score -= 20
-                    reasons.append("⚠️過熱(買われすぎ)")
-
-                score = max(0, min(100, score))
-                reason_str = "、".join(reasons) if reasons else "特になし"
-                
-                # 自動スクリーニングの足切り（新ロジックでは60点以上）
-                if mode == "🤖 注目・主要銘柄 自動スクリーニング" and (score < 60 or "⚠️" in reason_str):
-                    continue
-                
-                ex_div_txt = "-"
-                try:
-                    info = yf.Ticker(ticker).info
-                    ex_ts = info.get('exDividendDate')
-                    if pd.notna(ex_ts) and ex_ts is not None:
-                        ex_div_txt = datetime.fromtimestamp(ex_ts).strftime("%Y/%m/%d")
-                except:
-                    pass
-                
-                if score >= 80: rank_str = "★★★★★ 【S】強気買い"
-                elif score >= 60: rank_str = "★★★★☆ 【A】買いシグナル"
-                elif score >= 40: rank_str = "★★★☆☆ 【B】順張り"
-                elif rsi < 30: rank_str = "★★☆☆☆ 【特殊】逆張り狙い"
-                else: rank_str = "★☆☆☆☆ 【C】様子見"
-                
-                sig_txt = f"{rank_str}"
-
-                name = MAJOR_NAMES.get(code_str, code_str)
-                data_list.append({
-                    "コード": code_str, 
-                    "銘柄名": name, 
-                    "終値": round(c_c, 1), 
-                    "スコア": score,
-                    "主な要因・警告": reason_str,
-                    "権利落ち日": ex_div_txt,
-                    "上値余地": f"{round(dist_res, 1)}%", 
-                    "RSI": round(rsi, 1),
-                    "判定": sig_txt
-                })
-            except: continue
+                info = yf.Ticker(ticker).info
+                ex_ts = info.get('exDividendDate')
+                if pd.notna(ex_ts) and ex_ts is not None:
+                    ex_div_txt = datetime.fromtimestamp(ex_ts).strftime("%Y/%m/%d")
+            except: pass
+            
+            data_list.append({
+                "コード": code_str, 
+                "銘柄名": name, 
+                "終値": res["終値"], 
+                "スコア": res["スコア"],
+                "主な要因・警告": res["主な要因・警告"],
+                "権利落ち日": ex_div_txt,
+                "上値余地": res["上値余地"], 
+                "RSI": res["RSI"]
+            })
                 
         st.session_state.analysis_result = data_list
         if data_list:
             st.session_state.selected_code = data_list[0]["コード"]
             st.session_state.selected_name = data_list[0]["銘柄名"]
+        else:
+            st.warning("条件を満たす強い銘柄は現在ありませんでした。（相場全体の地合いが悪い可能性があります）")
 
+    # --- 結果表示・チャート描画フェーズ ---
     if st.session_state.analysis_result:
         df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(by="スコア", ascending=False).reset_index(drop=True)
-        # 不要な列を隠す（表示用）
-        df_display = df_res.drop(columns=['判定'])
-        
-        st.subheader("① 買いシグナル スコア抽出結果")
         
         event = st.dataframe(
-            df_display, 
+            df_res, 
             use_container_width=True, 
             on_select="rerun", 
             selection_mode="single-row",
@@ -430,7 +446,7 @@ if app_page == "🔍 銘柄スクリーニング":
             st.session_state.selected_code = df_res.iloc[event.selection.rows[0]]["コード"]
             st.session_state.selected_name = df_res.iloc[event.selection.rows[0]]["銘柄名"]
             
-        st.subheader(f"② {st.session_state.selected_code} {st.session_state.selected_name} の詳細分析")
+        st.markdown(f"### ② {st.session_state.selected_code} {st.session_state.selected_name} の詳細分析")
         warn = get_earnings_date(st.session_state.selected_code)
         if warn: st.error(warn)
         
@@ -440,7 +456,7 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        tf_choice = st.radio("チャート表示（足種切り替え）", ["日足", "週足", "月足"], horizontal=True)
+        tf_choice = st.radio("チャート表示（足種切り替え）", ["日足", "週足", "月足"], horizontal=True, key="screen_chart_tf")
         
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="6mo")
         if not df_daily.empty:
@@ -553,7 +569,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
-    port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["日足", "週足", "月足"], horizontal=True)
+    port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["日足", "週足", "月足"], horizontal=True, key="port_chart_tf")
     
     if st.button("🔄 最新の状況をチェックする", type="primary"):
         st.session_state.show_portfolio_charts = True
