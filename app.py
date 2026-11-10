@@ -100,13 +100,12 @@ def get_chart_data(code, tf_choice):
         df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
-# 🌐 【新機能】Yahoo!ランキングから今アツい銘柄をスクレイピング
-@st.cache_data(ttl=1800) # 30分キャッシュ
+@st.cache_data(ttl=1800)
 def get_trend_stocks(ranking_type="up_rate"):
     urls = {
-        "up_rate": "https://finance.yahoo.co.jp/ranking/up?opt=1", # 値上がり率
-        "vol_surge": "https://finance.yahoo.co.jp/ranking/volumeRapidIncrease", # 出来高急増
-        "high_update": "https://finance.yahoo.co.jp/ranking/highRate" # 年初来高値更新率
+        "up_rate": "https://finance.yahoo.co.jp/ranking/up?opt=1",
+        "vol_surge": "https://finance.yahoo.co.jp/ranking/volumeRapidIncrease",
+        "high_update": "https://finance.yahoo.co.jp/ranking/highRate"
     }
     url = urls.get(ranking_type, urls["up_rate"])
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -116,7 +115,6 @@ def get_trend_stocks(ranking_type="up_rate"):
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # ランク表から銘柄コードと名前を抽出 (上位50件まで)
         for a_tag in soup.select('a[href^="https://finance.yahoo.co.jp/quote/"]'):
             href = a_tag['href']
             code_match = re.search(r'/quote/(\d{4})\.T', href)
@@ -130,19 +128,28 @@ def get_trend_stocks(ranking_type="up_rate"):
         print(f"Scraping error: {e}")
     return codes_and_names
 
-# 🔍 【新機能】企業名から証券コードを検索
+# 🛡️ 【改良】証券コード直接入力時の強制データ取得対応
 @st.cache_data(ttl=86400)
 def search_code_by_name(query):
-    # 4桁の数字ならそのまま返す
-    if re.match(r'^\d{4}$', query.strip()):
-        return query.strip(), query.strip()
+    query = str(query).strip()
     
-    url = f"https://finance.yahoo.co.jp/search/?query={urllib.parse.quote(query.strip())}"
+    # 【改良ポイント】4桁の数字が入力された場合は、検索APIを介さず「証券コード」として確定させる
+    if re.match(r'^\d{4}$', query):
+        # 簡易的にyfinanceで存在チェックと会社名取得を試みる
+        try:
+            info = yf.Ticker(query + ".T").info
+            name = info.get('shortName', query) # 会社名が取れなければコードを名前にする
+            if name: return query, name
+        except:
+            # 取得に失敗しても強制的にコードとして返す（IPO直後などで情報が不足しているケースへの対応）
+            return query, f"銘柄({query})"
+    
+    # 企業名（文字列）が入力された場合は、これまで通り検索してコードを探す
+    url = f"https://finance.yahoo.co.jp/search/?query={urllib.parse.quote(query)}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
-        # 検索結果の1番目を抽出
         first_result = soup.select_one('a[href^="https://finance.yahoo.co.jp/quote/"]')
         if first_result:
             code_match = re.search(r'/quote/(\d{4})\.T', first_result['href'])
@@ -152,11 +159,12 @@ def search_code_by_name(query):
     except: pass
     return None, None
 
-# 💯 【新機能】100点満点スコアリングエンジン
 def calculate_score_and_technical(ticker):
     try:
+        # IPO銘柄など上場期間が短い場合に対応するため、取得期間を短め(6mo)に設定して許容する
         df = yf.Ticker(ticker).history(period="1y")
-        if df.empty or len(df) < 80: return None
+        # 最低限のボリンジャーバンド（25日）が計算できるデータ数（約30日分）があれば分析を実行
+        if df.empty or len(df) < 30: return None
         
         df['5MA'] = df['Close'].rolling(window=5).mean()
         df['25MA'] = df['Close'].rolling(window=25).mean()
@@ -179,15 +187,25 @@ def calculate_score_and_technical(ticker):
         df['Senkou_B'] = ((high_52 + low_52) / 2).shift(25)
         
         c_c = df['Close'].iloc[-1]
-        c_5, c_25, c_75 = df['5MA'].iloc[-1], df['25MA'].iloc[-1], df['75MA'].iloc[-1]
-        p_5, p_25, p_75 = df['5MA'].iloc[-2], df['25MA'].iloc[-2], df['75MA'].iloc[-2]
+        c_5 = df['5MA'].iloc[-1] if not pd.isna(df['5MA'].iloc[-1]) else c_c
+        c_25 = df['25MA'].iloc[-1] if not pd.isna(df['25MA'].iloc[-1]) else c_c
+        c_75 = df['75MA'].iloc[-1] if not pd.isna(df['75MA'].iloc[-1]) else c_c
         
-        is_vol_surge = df['Volume'].iloc[-1] > (df['Volume_5MA'].iloc[-2] * 1.5)
-        dist_res = ((df['High_60'].iloc[-1] - c_c) / c_c) * 100
+        p_5 = df['5MA'].iloc[-2] if len(df) > 1 and not pd.isna(df['5MA'].iloc[-2]) else c_5
+        p_25 = df['25MA'].iloc[-2] if len(df) > 1 and not pd.isna(df['25MA'].iloc[-2]) else c_25
+        p_75 = df['75MA'].iloc[-2] if len(df) > 1 and not pd.isna(df['75MA'].iloc[-2]) else c_75
+        
+        vol_surge = False
+        if len(df) > 1 and not pd.isna(df['Volume_5MA'].iloc[-2]):
+             vol_surge = df['Volume'].iloc[-1] > (df['Volume_5MA'].iloc[-2] * 1.5)
+             
+        dist_res = 0
+        if not pd.isna(df['High_60'].iloc[-1]) and c_c > 0:
+            dist_res = ((df['High_60'].iloc[-1] - c_c) / c_c) * 100
         
         delta = df['Close'].diff()
         rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        rsi = 100 - (100 / (1 + rs)).iloc[-1] if not pd.isna(rs.iloc[-1]) else 50
         
         macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
         sig = macd.ewm(span=9).mean()
@@ -197,17 +215,20 @@ def calculate_score_and_technical(ticker):
         is_gc_macd = (macd.iloc[-2] <= sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and is_25ma_up
         
         is_po = (c_5 > c_25 > c_75) and (c_5 >= p_5) and (c_25 >= p_25) and (c_75 >= p_75)
-        is_bb_exp = df['BB_width'].iloc[-1] > (df['BB_width'].iloc[-5] * 1.1)
-        is_bandwalk = is_bb_exp and (c_c >= (c_25 + df['BB_std'].iloc[-1]))
         
-        # 日経平均の簡易比較（ここだけ同期的に取得すると重いので、簡易的に直近の上昇率のみで加点）
-        stock_5d_ret = (c_c - df['Close'].iloc[-6]) / df['Close'].iloc[-6]
+        is_bandwalk = False
+        if len(df) > 5 and not pd.isna(df['BB_width'].iloc[-5]):
+            is_bb_exp = df['BB_width'].iloc[-1] > (df['BB_width'].iloc[-5] * 1.1)
+            is_bandwalk = is_bb_exp and (c_c >= (c_25 + df['BB_std'].iloc[-1]))
         
-        senkou_max = max(df['Senkou_A'].iloc[-1], df['Senkou_B'].iloc[-1])
-        p_senkou_max = max(df['Senkou_A'].iloc[-2], df['Senkou_B'].iloc[-2])
+        stock_5d_ret = 0
+        if len(df) > 6: stock_5d_ret = (c_c - df['Close'].iloc[-6]) / df['Close'].iloc[-6]
+        
+        senkou_max = max(df['Senkou_A'].iloc[-1], df['Senkou_B'].iloc[-1]) if not pd.isna(df['Senkou_A'].iloc[-1]) else c_c
+        p_senkou_max = max(df['Senkou_A'].iloc[-2], df['Senkou_B'].iloc[-2]) if len(df) > 1 and not pd.isna(df['Senkou_A'].iloc[-2]) else c_c
         is_above_cloud = c_c > senkou_max
         is_cloud_breakout = is_above_cloud and (df['Close'].iloc[-2] <= p_senkou_max)
-        is_tenkan_above_kijun = df['Tenkan'].iloc[-1] > df['Kijun'].iloc[-1]
+        is_tenkan_above_kijun = df['Tenkan'].iloc[-1] > df['Kijun'].iloc[-1] if not pd.isna(df['Tenkan'].iloc[-1]) else False
         is_chikou_above = c_c > df['Close'].iloc[-26] if len(df) >= 26 else False
         is_sanyaku = is_above_cloud and is_tenkan_above_kijun and is_chikou_above
         
@@ -231,8 +252,9 @@ def calculate_score_and_technical(ticker):
         if 50 <= rsi <= 75: score += 10
         elif rsi < 30: score += 15; reasons.append("売られすぎ")
             
-        if is_vol_surge: score += 10; reasons.append("出来高急増")
-        if c_c >= df['High_20'].iloc[-2]: score += 10; reasons.append("高値更新")
+        if vol_surge: score += 10; reasons.append("出来高急増")
+        if len(df) > 1 and not pd.isna(df['High_20'].iloc[-2]) and c_c >= df['High_20'].iloc[-2]: 
+            score += 10; reasons.append("高値更新")
 
         if dist_res < 3.0: score -= 20; reasons.append("⚠️抵抗線接近")
         if rsi > 80: score -= 20; reasons.append("⚠️買われすぎ")
@@ -247,7 +269,9 @@ def calculate_score_and_technical(ticker):
             "上値余地": f"{round(dist_res, 1)}%", 
             "RSI": round(rsi, 1)
         }
-    except: return None
+    except Exception as e: 
+        print(f"Error analyzing {ticker}: {e}")
+        return None
 
 # ==========================================
 # データの保存・読み込み（永続化機能）
@@ -307,7 +331,7 @@ rights_warning = check_rights_date_warning()
 if rights_warning: st.warning(rights_warning)
 
 # ==============================================================================
-# ページ1: 銘柄スクリーニング (大改造)
+# ページ1: 銘柄スクリーニング
 # ==============================================================================
 if app_page == "🔍 銘柄スクリーニング":
     st.markdown("### どのような方法で銘柄を探しますか？")
@@ -320,7 +344,7 @@ if app_page == "🔍 銘柄スクリーニング":
     
     tickers_to_analyze = []
     run_analysis = False
-    is_strict_mode = True # トレンドモードや監視リストは足切り(60点)を行う
+    is_strict_mode = True 
     
     st.markdown("---")
     
@@ -350,16 +374,17 @@ if app_page == "🔍 銘柄スクリーニング":
                     tickers_to_analyze = [{"code": t["code"]+".T", "name": t["name"]} for t in trend_list]
 
     elif search_mode == "🔍 特定の銘柄を深く分析 (フリーワード/コード検索)":
-        st.write("企業名（例: 竹内製作所、ソニー）または証券コードを入力して、100点満点の詳細分析を行います。全上場銘柄に対応しています。")
-        search_query = st.text_input("企業名 または 証券コード (4桁)", placeholder="例: オリエンタルランド、4661")
+        st.write("企業名（例: 竹内製作所）または証券コード（例: 4661）を入力して、100点満点の詳細分析を行います。IPO銘柄は4桁のコードを入力してください。")
+        search_query = st.text_input("企業名 または 証券コード (4桁)", placeholder="例: 4661")
+        
         if st.button("🔍 分析開始", type="primary") and search_query:
-            with st.spinner("銘柄を検索中..."):
+            with st.spinner("銘柄データを取得・分析中..."):
                 code, name = search_code_by_name(search_query)
                 if code:
-                    st.success(f"「{name} ({code})」を発見しました。分析を開始します...")
+                    st.success(f"「{name} ({code})」のデータを取得しました。分析結果を表示します。")
                     tickers_to_analyze = [{"code": code+".T", "name": name}]
                     run_analysis = True
-                    is_strict_mode = False # 個別検索は点数が低くても必ず表示する
+                    is_strict_mode = False 
                 else:
                     st.error("銘柄が見つかりませんでした。正式な企業名かコードを確認してください。")
 
@@ -390,11 +415,9 @@ if app_page == "🔍 銘柄スクリーニング":
             res = calculate_score_and_technical(ticker)
             if not res: continue
             
-            # 足切りロジック (個別検索以外は、スコア60未満 または 警告ありを除外)
             if is_strict_mode and (res["スコア"] < 60 or "⚠️" in res["主な要因・警告"]):
                 continue
             
-            # 抽出されたものだけ権利落ち日を取得
             ex_div_txt = "-"
             try:
                 info = yf.Ticker(ticker).info
@@ -458,10 +481,11 @@ if app_page == "🔍 銘柄スクリーニング":
         
         tf_choice = st.radio("チャート表示（足種切り替え）", ["日足", "週足", "月足"], horizontal=True, key="screen_chart_tf")
         
-        df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="6mo")
+        # 上場間もないIPO株にも対応できるよう期間を1年分取得し、計算に必要な最低限のデータがあれば動かす
+        df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="1y")
         if not df_daily.empty:
             tr = pd.concat([df_daily['High'] - df_daily['Low'], abs(df_daily['High'] - df_daily['Close'].shift()), abs(df_daily['Low'] - df_daily['Close'].shift())], axis=1).max(axis=1)
-            atr = tr.rolling(14).mean().iloc[-1]
+            atr = tr.rolling(14).mean().iloc[-1] if len(tr) >= 14 else (df_daily['High'].iloc[-1] - df_daily['Low'].iloc[-1])
             latest_price = df_daily['Close'].iloc[-1]
             take_profit = latest_price + (atr * 2)
             stop_loss = latest_price - (atr * 1.5)
@@ -474,19 +498,23 @@ if app_page == "🔍 銘柄スクリーニング":
             df_c, ma_s, ma_l, name_s, name_l = get_chart_data(st.session_state.selected_code, tf_choice)
             
             if not df_c.empty:
-                df_c['MA_S'] = df_c['Close'].rolling(ma_s).mean()
-                df_c['MA_L'] = df_c['Close'].rolling(ma_l).mean()
+                # 取得期間が短くてもエラーにならないよう調整
+                df_c['MA_S'] = df_c['Close'].rolling(min(ma_s, len(df_c))).mean()
+                df_c['MA_L'] = df_c['Close'].rolling(min(ma_l, len(df_c))).mean()
                 
                 if tf_choice == "日足":
-                    df_c['MA_75'] = df_c['Close'].rolling(75).mean()
+                    df_c['MA_75'] = df_c['Close'].rolling(min(75, len(df_c))).mean()
                 
-                df_c['BB_std'] = df_c['Close'].rolling(ma_l).std()
-                df_c['BB_upper'], df_c['BB_lower'] = df_c['MA_L'] + (df_c['BB_std']*2), df_c['MA_L'] - (df_c['BB_std']*2)
+                df_c['BB_std'] = df_c['Close'].rolling(min(ma_l, len(df_c))).std()
+                df_c['BB_upper'] = df_c['MA_L'] + (df_c['BB_std']*2)
+                df_c['BB_lower'] = df_c['MA_L'] - (df_c['BB_std']*2)
                 
-                macd = df_c['Close'].ewm(span=12).mean() - df_c['Close'].ewm(span=26).mean()
-                sig = macd.ewm(span=9).mean()
+                macd = df_c['Close'].ewm(span=12, adjust=False).mean() - df_c['Close'].ewm(span=26, adjust=False).mean()
+                sig = macd.ewm(span=9, adjust=False).mean()
+                
                 delta = df_c['Close'].diff()
-                rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / -delta.where(delta < 0, 0).rolling(14).mean())))
+                rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
+                rsi = 100 - (100 / (1 + rs)).iloc[-1] if not pd.isna(rs.iloc[-1]) else 50
 
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
                 fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
@@ -508,9 +536,10 @@ if app_page == "🔍 銘柄スクリーニング":
                 fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=2, col=1)
 
-                fig.add_trace(go.Scatter(x=df_c.index, y=rsi, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
-                fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-                fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+                if len(rsi_series := 100 - (100 / (1 + rs))) > 0:
+                    fig.add_trace(go.Scatter(x=df_c.index, y=rsi_series, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
+                    fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+                    fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
                 fig.update_layout(xaxis_rangeslider_visible=False, height=650, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
@@ -602,7 +631,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 total_current_value += (latest_price * shares)
                 
                 tr = pd.concat([df_daily_p['High'] - df_daily_p['Low'], abs(df_daily_p['High'] - df_daily_p['Close'].shift()), abs(df_daily_p['Low'] - df_daily_p['Close'].shift())], axis=1).max(axis=1)
-                atr = tr.rolling(14).mean().iloc[-1]
+                atr = tr.rolling(14).mean().iloc[-1] if len(tr) >= 14 else (df_daily_p['High'].iloc[-1] - df_daily_p['Low'].iloc[-1])
                 
                 take_profit = entry_price + (atr * 2) if entry_price > 0 else 0
                 stop_loss = entry_price - (atr * 1.5) if entry_price > 0 else 0
@@ -630,8 +659,8 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice)
                 
                 if not df_p.empty:
-                    df_p['MA_S'] = df_p['Close'].rolling(ma_s).mean()
-                    df_p['MA_L'] = df_p['Close'].rolling(ma_l).mean()
+                    df_p['MA_S'] = df_p['Close'].rolling(min(ma_s, len(df_p))).mean()
+                    df_p['MA_L'] = df_p['Close'].rolling(min(ma_l, len(df_p))).mean()
                     fig_p = go.Figure()
                     fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)))
