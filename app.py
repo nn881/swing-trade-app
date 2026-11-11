@@ -89,7 +89,6 @@ def check_rights_date_warning():
         return "⚠️ 【権利落ち日 接近アラート】まもなく月末の配当・優待権利落ち日が到来します。権利落ちによる株価の急落リスクにご注意ください。"
     return None
 
-# 📊 【改良】選択された期間と足種に基づいたデータ取得
 def get_chart_data(code, tf_choice, period_choice):
     yf_period_map = {
         "1日": "1d", "2日": "2d", "4日": "4d", "5日": "5d",
@@ -105,7 +104,6 @@ def get_chart_data(code, tf_choice, period_choice):
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="1mo")
         return df, 12, 24, "12ヶ月線", "24ヶ月線"
     elif tf_choice == "5分足":
-        # yfinanceの5分足取得は最大60日間の制限があるため、超えた場合はクリップ
         if yf_period in ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"]:
             yf_period = "60d"
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="5m")
@@ -116,15 +114,15 @@ def get_chart_data(code, tf_choice, period_choice):
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
-# 📊 【大改修】X軸の目盛りを各足種に最適な間隔へ固定設定
-def apply_xaxis_formatting(fig, df, tf_choice):
+# 📊 【大改修】XY軸の最適化（Y軸のMAX/MIN動的調整と固定目盛り間隔を実装）
+def apply_axis_formatting(fig, df, tf_choice, tp=None, sl=None):
     if df.empty: return
     fig.update_layout(xaxis_rangeslider_visible=False)
     
+    # --- X軸フォーマット ---
     if tf_choice == "5分足":
         fig.update_xaxes(
-            dtick=3600000, # 1時間ごと（ミリ秒指定：60 * 60 * 1000 = 3,600,000）
-            tickformat="%H:%M", tickangle=-45,
+            dtick=3600000, tickformat="%H:%M", tickangle=-45,
             rangebreaks=[
                 dict(bounds=["sat", "mon"]),
                 dict(bounds=[15, 9], pattern="hour"),
@@ -132,21 +130,38 @@ def apply_xaxis_formatting(fig, df, tf_choice):
             ]
         )
     elif tf_choice == "日足":
-        fig.update_xaxes(
-            dtick="M1", # 1ヶ月ごと
-            tickformat="%Y-%m", tickangle=-45,
-            rangebreaks=[dict(bounds=["sat", "mon"])]
-        )
+        fig.update_xaxes(dtick="M1", tickformat="%Y-%m", tickangle=-45, rangebreaks=[dict(bounds=["sat", "mon"])])
     elif tf_choice == "週足":
-        fig.update_xaxes(
-            dtick="M3", # 3ヶ月ごと
-            tickformat="%Y-%m", tickangle=-45
-        )
+        fig.update_xaxes(dtick="M3", tickformat="%Y-%m", tickangle=-45)
     elif tf_choice == "月足":
-        fig.update_xaxes(
-            dtick="M12", # 1年ごと
-            tickformat="%Y", tickangle=0
-        )
+        fig.update_xaxes(dtick="M12", tickformat="%Y", tickangle=0)
+        
+    # --- Y軸フォーマット (Row 1 メインチャートのみに適用) ---
+    try:
+        cols_max = ['High']
+        cols_min = ['Low']
+        if 'BB_upper' in df.columns: cols_max.append('BB_upper')
+        if 'BB_lower' in df.columns: cols_min.append('BB_lower')
+        
+        y_max = df[cols_max].max().max()
+        y_min = df[cols_min].min().min()
+        
+        # 描画するターゲットライン(利確・損切)が見切れないように考慮
+        if tp is not None and tp > y_max: y_max = tp
+        if sl is not None and sl < y_min: y_min = sl
+            
+        margin = (y_max - y_min) * 0.05 # 上下に5%の余白を設ける
+        
+        if pd.notna(y_max) and pd.notna(y_min):
+            dtick_val = 20 if tf_choice == "5分足" else 200
+            fig.update_yaxes(
+                range=[y_min - margin, y_max + margin],
+                dtick=dtick_val,
+                row=1, col=1
+            )
+    except Exception as e:
+        pass
+
 
 @st.cache_data(ttl=1800)
 def get_trend_stocks(ranking_type="up_rate"):
@@ -446,7 +461,6 @@ if app_page == "🔍 銘柄スクリーニング":
             tickers_to_analyze = [{"code": c+".T", "name": c} for c in codes]
             if tickers_to_analyze: run_analysis = True
 
-    # --- スコアリング実行フェーズ ---
     if run_analysis and tickers_to_analyze:
         st.markdown("### ① 買いシグナル抽出結果")
         progress_bar = st.progress(0)
@@ -499,7 +513,6 @@ if app_page == "🔍 銘柄スクリーニング":
         elif is_strict_mode:
             st.info("現在、条件を満たす強い銘柄はありませんでした。（相場全体の地合いが悪い可能性があります）")
 
-    # --- 結果表示・チャート描画フェーズ ---
     if st.session_state.analysis_result:
         df_res = pd.DataFrame(st.session_state.analysis_result).sort_values(by="スコア", ascending=False).reset_index(drop=True)
         
@@ -534,19 +547,18 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        # 📈 【大改修】足種に応じて期間の選択肢とデフォルト値を動的に切り替え
         c_tf, c_pd = st.columns(2)
         with c_tf:
             tf_choice = st.radio("📊 チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="screen_chart_tf")
         
         if tf_choice == "5分足":
-            s_pd_opts, s_pd_idx = ["1日", "2日", "4日", "5日"], 0  # デフォルト: その日のみ(1日)
+            s_pd_opts, s_pd_idx = ["1日", "2日", "4日", "5日"], 0
         elif tf_choice == "日足":
-            s_pd_opts, s_pd_idx = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"], 1  # デフォルト: 3ヶ月
+            s_pd_opts, s_pd_idx = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"], 1
         elif tf_choice == "週足":
-            s_pd_opts, s_pd_idx = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"], 2  # デフォルト: 1年
+            s_pd_opts, s_pd_idx = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"], 2
         elif tf_choice == "月足":
-            s_pd_opts, s_pd_idx = ["1年", "2年", "5年", "10年", "最大"], 2  # デフォルト: 5年
+            s_pd_opts, s_pd_idx = ["1年", "2年", "5年", "10年", "最大"], 2
 
         with c_pd:
             period_choice = st.radio("⏱️ 表示期間", s_pd_opts, index=s_pd_idx, horizontal=True, key="screen_chart_pd")
@@ -618,7 +630,8 @@ if app_page == "🔍 銘柄スクリーニング":
                     hovermode="x unified"
                 )
                 
-                apply_xaxis_formatting(fig, df_c, tf_choice)
+                # 📈 【適用】Y軸の最適化を適用
+                apply_axis_formatting(fig, df_c, tf_choice, tp=take_profit, sl=stop_loss)
                 
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
 
@@ -676,7 +689,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
-    # 📈 【大改修】ポートフォリオ側も同様に動的に切り替え
     c_tf_p, c_pd_p = st.columns(2)
     with c_tf_p:
         port_tf_choice = st.radio("📊 全チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="port_chart_tf")
@@ -798,7 +810,9 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                         hovermode="x unified"
                     )
                     
-                    apply_xaxis_formatting(fig_p, df_p, port_tf_choice)
+                    # 📈 【適用】Y軸の最適化を適用
+                    apply_axis_formatting(fig_p, df_p, port_tf_choice, tp=take_profit, sl=stop_loss)
+                    
                     st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
                 
                 st.markdown("---")
