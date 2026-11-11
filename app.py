@@ -10,6 +10,7 @@ import re
 import os
 from datetime import datetime, timedelta
 import urllib.parse
+import concurrent.futures # 🚀 新たに並列処理ライブラリを追加
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
@@ -66,6 +67,28 @@ components.html(
 )
 
 # ==========================================
+# 銘柄リスト定義
+# ==========================================
+MY_STOCKS = ["7974", "4751", "9101", "3990"]
+MAJOR_NAMES = {
+    "2002": "日清製粉G", "2267": "ヤクルト", "2269": "明治HD", "2282": "日本ハム", "2502": "アサヒG", "2503": "キリンHD", "2801": "キッコーマン", "2802": "味の素", "2914": "JT",
+    "3402": "東レ", "3407": "旭化成", "4005": "住友化学", "4021": "日産化学", "4061": "デンカ", "4063": "信越化学工業", "4183": "三井化学", "4188": "三菱ケミカルG", "4452": "花王", "4901": "富士フイルム", "4911": "資生堂", "8113": "ユニ・チャーム",
+    "4502": "武田薬品工業", "4503": "アステラス製薬", "4507": "塩野義製薬", "4519": "中外製薬", "4523": "エーザイ", "4528": "小野薬品工業", "4568": "第一三共", "4578": "大塚HD",
+    "5019": "出光興産", "5020": "ENEOS", "5201": "AGC", "5332": "TOTO", "5333": "日本ガイシ", "5401": "日本製鉄", "5411": "JFE", "5713": "住友金属鉱山", "5714": "DOWA", "5802": "住友電工",
+    "6273": "SMC", "6301": "コマツ", "6326": "クボタ", "6367": "ダイキン工業", "6432": "竹内製作所", "6481": "THK", "7011": "三菱重工", "7012": "川崎重工", "7013": "IHI",
+    "6146": "ディスコ", "6501": "日立製作所", "6503": "三菱電機", "6504": "富士電機", "6506": "安川電機", "6594": "ニデック", "6645": "オムロン", "6702": "富士通", "6723": "ルネサス", "6752": "パナソニック", "6758": "ソニーG", "6762": "TDK", "6857": "アドバンテスト", "6861": "キーエンス", "6902": "デンソー", "6920": "レーザーテック", "6954": "ファナック", "6971": "京セラ", "6981": "村田製作所", "7733": "オリンパス", "7741": "HOYA", "7751": "キヤノン", "8035": "東京エレクトロン",
+    "7201": "日産自動車", "7202": "いすゞ", "7203": "トヨタ自動車", "7259": "アイシン", "7267": "ホンダ", "7269": "スズキ", "7270": "SUBARU", "7272": "ヤマハ発動機",
+    "2768": "双日", "8001": "伊藤忠商事", "8002": "丸紅", "8015": "豊田通商", "8031": "三井物産", "8053": "住友商事", "8058": "三菱商事",
+    "3086": "Jフロント", "3092": "ZOZO", "3382": "セブン＆アイ", "3659": "ネクソン", "4307": "野村総研", "4324": "電通G", "4661": "オリエンタルランド", "4704": "トレンドマイクロ", "4751": "サイバーエージェント", "6098": "リクルート", "7532": "パンパシフィック", "7974": "任天堂", "8252": "丸井G", "8267": "イオン", "9432": "NTT", "9433": "KDDI", "9434": "ソフトバンク", "9613": "NTTデータ", "9735": "セコム", "9843": "ニトリ", "9983": "ファーストリテイリング", "9984": "ソフトバンクG",
+    "8306": "三菱UFJ", "8308": "りそな", "8309": "三井住友トラスト", "8316": "三井住友", "8411": "みずほ", "8591": "オリックス", "8604": "野村HD", "8630": "SOMPO", "8725": "MS&AD", "8750": "第一生命", "8766": "東京海上",
+    "1801": "大成建設", "1802": "大林組", "1803": "清水建設", "1812": "鹿島", "1925": "大和ハウス", "1928": "積水ハウス", "3289": "東急不動産", "8801": "三井不動産", "8802": "三菱地所", "8804": "東京建物", "8830": "住友不動産",
+    "9501": "東京電力HD", "9502": "中部電力", "9503": "関西電力", "9531": "東京ガス", "9532": "大阪ガス",
+    "9020": "JR東日本", "9021": "JR西日本", "9022": "JR東海", "9101": "日本郵船", "9104": "商船三井", "9107": "川崎汽船", "9143": "SGHD", "9147": "NIPPON EXPRESS", "9201": "JAL", "9202": "ANA",
+    "7911": "TOPPAN", "7912": "大日本印刷", "7936": "アシックス", "7951": "ヤマハ"
+}
+TARGET_STOCKS = list(dict.fromkeys(MY_STOCKS + list(MAJOR_NAMES.keys())))
+
+# ==========================================
 # ユーティリティ・アラート・データ取得関数
 # ==========================================
 @st.cache_data(ttl=3600)
@@ -114,20 +137,14 @@ def get_chart_data(code, tf_choice, period_choice):
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
-# 📊 【大改修】XY軸の最適化（Y軸のMAX/MIN動的調整と固定目盛り間隔を実装）
 def apply_axis_formatting(fig, df, tf_choice, tp=None, sl=None):
     if df.empty: return
     fig.update_layout(xaxis_rangeslider_visible=False)
     
-    # --- X軸フォーマット ---
     if tf_choice == "5分足":
         fig.update_xaxes(
             dtick=3600000, tickformat="%H:%M", tickangle=-45,
-            rangebreaks=[
-                dict(bounds=["sat", "mon"]),
-                dict(bounds=[15, 9], pattern="hour"),
-                dict(bounds=[11.5, 12.5], pattern="hour")
-            ]
+            rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15, 9], pattern="hour"), dict(bounds=[11.5, 12.5], pattern="hour")]
         )
     elif tf_choice == "日足":
         fig.update_xaxes(dtick="M1", tickformat="%Y-%m", tickangle=-45, rangebreaks=[dict(bounds=["sat", "mon"])])
@@ -136,21 +153,21 @@ def apply_axis_formatting(fig, df, tf_choice, tp=None, sl=None):
     elif tf_choice == "月足":
         fig.update_xaxes(dtick="M12", tickformat="%Y", tickangle=0)
         
-    # --- Y軸フォーマット (Row 1 メインチャートのみに適用) ---
     try:
         cols_max = ['High']
         cols_min = ['Low']
         if 'BB_upper' in df.columns: cols_max.append('BB_upper')
         if 'BB_lower' in df.columns: cols_min.append('BB_lower')
+        # 🛡️ 抵抗線もMAX値の計算に含める
+        if 'Resistance' in df.columns: cols_max.append('Resistance')
         
         y_max = df[cols_max].max().max()
         y_min = df[cols_min].min().min()
         
-        # 描画するターゲットライン(利確・損切)が見切れないように考慮
         if tp is not None and tp > y_max: y_max = tp
         if sl is not None and sl < y_min: y_min = sl
             
-        margin = (y_max - y_min) * 0.05 # 上下に5%の余白を設ける
+        margin = (y_max - y_min) * 0.05 
         
         if pd.notna(y_max) and pd.notna(y_min):
             dtick_val = 20 if tf_choice == "5分足" else 200
@@ -162,42 +179,49 @@ def apply_axis_formatting(fig, df, tf_choice, tp=None, sl=None):
     except Exception as e:
         pass
 
-
-@st.cache_data(ttl=1800)
-def get_trend_stocks(ranking_type="up_rate"):
-    urls = {
-        "up_rate": "https://kabutan.jp/warning/?mode=2_1",
-        "vol_surge": "https://kabutan.jp/warning/?mode=3_1",
-        "high_update": "https://kabutan.jp/warning/?mode=4_1"
-    }
-    url = urls.get(ranking_type, urls["up_rate"])
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    }
-    
-    codes_and_names = []
+# 🚀 【大改修】外部サイトのスクレイピングを廃止し、自前の計算エンジンを実装！
+def fetch_single_stock_summary(code):
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, 'html.parser')
+        df = yf.Ticker(code + ".T").history(period="5d")
+        if len(df) >= 2:
+            c_c = df['Close'].iloc[-1]
+            p_c = df['Close'].iloc[-2]
+            v_c = df['Volume'].iloc[-1]
+            v_mean = df['Volume'].iloc[:-1].mean()
+            h_max = df['High'].max()
+            
+            up_rate = (c_c - p_c) / p_c if p_c > 0 else 0
+            vol_ratio = v_c / v_mean if v_mean > 0 else 0
+            is_high = c_c >= h_max
+            return {"code": code, "up_rate": up_rate, "vol_ratio": vol_ratio, "is_high": is_high}
+    except: pass
+    return None
+
+@st.cache_data(ttl=900) # 15分ごとに更新
+def get_internal_trend_stocks(ranking_type, manual_tickers_str=""):
+    # 主要銘柄＋ユーザーが登録した全銘柄を対象にする
+    manual_codes = [c.strip().upper() for c in manual_tickers_str.split('\n') if re.match(r'^[0-9A-Z]{4}$', c.strip().upper())]
+    all_codes = list(dict.fromkeys(TARGET_STOCKS + manual_codes))
+    
+    results = []
+    # 並列処理で一気にデータを取得（スクレイピングではないのでブロックされない）
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(fetch_single_stock_summary, code): code for code in all_codes}
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            if res is not None:
+                res["name"] = MAJOR_NAMES.get(res["code"], f"銘柄({res['code']})")
+                results.append(res)
+                
+    if ranking_type == "up_rate":
+        results.sort(key=lambda x: x["up_rate"], reverse=True)
+    elif ranking_type == "vol_surge":
+        results.sort(key=lambda x: x["vol_ratio"], reverse=True)
+    elif ranking_type == "high_update":
+        results = [r for r in results if r["is_high"]]
+        results.sort(key=lambda x: x["up_rate"], reverse=True)
         
-        tables = soup.find_all('table', class_='stock_table')
-        if tables:
-            for tr in tables[0].find_all('tr')[1:]:
-                tds = tr.find_all('td')
-                if len(tds) >= 2:
-                    code_a = tds[0].find('a')
-                    if code_a:
-                        code = code_a.text.strip().upper()
-                        if re.match(r'^[0-9A-Z]{4}$', code):
-                            name_a = tds[1].find('a')
-                            name = name_a.text.strip() if name_a else f"銘柄({code})"
-                            if code not in [item['code'] for item in codes_and_names]:
-                                codes_and_names.append({"code": code, "name": name})
-                            if len(codes_and_names) >= 50:
-                                break
-    except Exception as e:
-        print(f"Scraping error (Kabutan): {e}")
-    return codes_and_names
+    return results[:50]
 
 @st.cache_data(ttl=86400)
 def search_code_by_name(query):
@@ -398,7 +422,7 @@ if app_page == "🔍 銘柄スクリーニング":
     st.markdown("### どのような方法で銘柄を探しますか？")
     
     search_mode = st.radio("スクリーニング手法", 
-                           ["🔥 今日のトレンド株を発掘 (ランキング連携)", 
+                           ["🔥 今日のトレンド株を発掘 (自社エンジン)", 
                             "🔍 特定の銘柄を深く分析 (フリーワード/コード検索)",
                             "📝 いつもの監視リストをチェック"], 
                            horizontal=True, label_visibility="collapsed")
@@ -409,8 +433,8 @@ if app_page == "🔍 銘柄スクリーニング":
     
     st.markdown("---")
     
-    if search_mode == "🔥 今日のトレンド株を発掘 (ランキング連携)":
-        st.write("株探（Kabutan）のデータベースから、今市場で最も注目されている上位銘柄を自動で引っ張ってきて、スコアリングにかけます。")
+    if search_mode == "🔥 今日のトレンド株を発掘 (自社エンジン)":
+        st.write("アプリ内部の自立型エンジンが「主要150銘柄＋監視リスト」のデータをリアルタイムで一斉取得し、ランキングを自動生成します。（※外部サイトに依存しないためブロックされません）")
         col1, col2, col3 = st.columns(3)
         ranking_choice = "up_rate"
         
@@ -425,10 +449,10 @@ if app_page == "🔍 銘柄スクリーニング":
                 ranking_choice, run_analysis = "high_update", True
                 
         if run_analysis:
-            with st.spinner("市場データを収集中..."):
-                trend_list = get_trend_stocks(ranking_choice)
+            with st.spinner("市場データを並列収集中...（数秒かかります）"):
+                trend_list = get_internal_trend_stocks(ranking_choice, st.session_state.manual_tickers)
                 if not trend_list:
-                    st.error("データの取得に失敗しました。時間をおいて再試行してください。")
+                    st.error("データの取得に失敗しました。")
                     run_analysis = False
                 else:
                     st.success(f"{len(trend_list)}銘柄を抽出しました。スコアリングを開始します...")
@@ -582,11 +606,18 @@ if app_page == "🔍 銘柄スクリーニング":
                 df_c['MA_S'] = df_c['Close'].rolling(min(ma_s, len(df_c))).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(min(ma_l, len(df_c))).mean()
                 
+                # 📈 【新機能】抵抗線（直近高値）の計算
+                res_period = 60 if tf_choice in ["日足", "5分足"] else (26 if tf_choice == "週足" else 12)
+                df_c['Resistance'] = df_c['High'].rolling(min(res_period, len(df_c))).max()
+                
                 fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2])
                 
                 fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
+                
+                # 📈 【描画】上値抵抗線（ピンク点線）
+                fig.add_trace(go.Scatter(x=df_c.index, y=df_c['Resistance'], mode='lines', name='上値抵抗線', line=dict(color='pink', width=1.5, dash='dash')), row=1, col=1)
                 
                 if tf_choice in ["日足", "5分足"]:
                     ma_75_name = "75日線" if tf_choice == "日足" else "75本線"
@@ -630,7 +661,6 @@ if app_page == "🔍 銘柄スクリーニング":
                     hovermode="x unified"
                 )
                 
-                # 📈 【適用】Y軸の最適化を適用
                 apply_axis_formatting(fig, df_c, tf_choice, tp=take_profit, sl=stop_loss)
                 
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
@@ -769,11 +799,18 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     df_p['MA_S'] = df_p['Close'].rolling(min(ma_s, len(df_p))).mean()
                     df_p['MA_L'] = df_p['Close'].rolling(min(ma_l, len(df_p))).mean()
                     
+                    # 📈 抵抗線計算
+                    res_period = 60 if port_tf_choice in ["日足", "5分足"] else (26 if port_tf_choice == "週足" else 12)
+                    df_p['Resistance'] = df_p['High'].rolling(min(res_period, len(df_p))).max()
+                    
                     fig_p = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2])
                     
                     fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'), row=1, col=1)
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
+                    
+                    # 📈 抵抗線描画
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['Resistance'], mode='lines', name='上値抵抗線', line=dict(color='pink', width=1.5, dash='dash')), row=1, col=1)
                     
                     if port_tf_choice in ["日足", "5分足"]:
                         ma_75_name = "75日線" if port_tf_choice == "日足" else "75本線"
@@ -810,9 +847,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                         hovermode="x unified"
                     )
                     
-                    # 📈 【適用】Y軸の最適化を適用
                     apply_axis_formatting(fig_p, df_p, port_tf_choice, tp=take_profit, sl=stop_loss)
-                    
                     st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
                 
                 st.markdown("---")
