@@ -160,11 +160,9 @@ def apply_axis_formatting(fig, df, tf_choice, tp=None, sl=None):
         if 'BB_lower' in df.columns: cols_min.append('BB_lower')
         if 'Resistance' in df.columns: cols_max.append('Resistance')
         
-        # 修正ポイント: 利確・損切(tp, sl)を範囲計算から完全に除外
         y_max = df[cols_max].max(skipna=True).max()
         y_min = df[cols_min].min(skipna=True).min()
             
-        # 修正ポイント: 上下余白を10%に設定して綺麗に収める
         margin = (y_max - y_min) * 0.1 
         if margin == 0: margin = y_max * 0.05
         
@@ -380,10 +378,17 @@ def load_portfolio():
 def save_portfolio(df):
     df.to_csv(PORTFOLIO_FILE, index=False)
 
+# 🔄 【修正】チャート設定（足種・期間）をsession_stateで確実に管理して即時反映させる
 if "manual_tickers" not in st.session_state: st.session_state.manual_tickers = load_tickers()
 if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
 if "portfolio_df" not in st.session_state: st.session_state.portfolio_df = load_portfolio()
 if "show_portfolio_charts" not in st.session_state: st.session_state.show_portfolio_charts = False
+
+# 初期設定の注入
+if "screen_chart_tf" not in st.session_state: st.session_state.screen_chart_tf = "日足"
+if "screen_chart_pd" not in st.session_state: st.session_state.screen_chart_pd = "3ヶ月"
+if "port_chart_tf" not in st.session_state: st.session_state.port_chart_tf = "日足"
+if "port_chart_pd" not in st.session_state: st.session_state.port_chart_pd = "3ヶ月"
 
 # ==========================================
 # サイドバー
@@ -567,21 +572,37 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
+        # 🔄 【修正】on_changeコールバックを利用して強制的に再描画させる
+        def update_screen_tf():
+            # 足種が変更されたら、デフォルトの表示期間も自動設定する
+            tf = st.session_state.screen_chart_tf_temp
+            st.session_state.screen_chart_tf = tf
+            if tf == "5分足": st.session_state.screen_chart_pd = "1日"
+            elif tf == "日足": st.session_state.screen_chart_pd = "3ヶ月"
+            elif tf == "週足": st.session_state.screen_chart_pd = "1年"
+            elif tf == "月足": st.session_state.screen_chart_pd = "5年"
+            
+        def update_screen_pd():
+            st.session_state.screen_chart_pd = st.session_state.screen_chart_pd_temp
+
         c_tf, c_pd = st.columns(2)
         with c_tf:
-            tf_choice = st.radio("📊 チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="screen_chart_tf")
+            st.radio("📊 チャート足種", ["5分足", "日足", "週足", "月足"], 
+                     index=["5分足", "日足", "週足", "月足"].index(st.session_state.screen_chart_tf), 
+                     horizontal=True, key="screen_chart_tf_temp", on_change=update_screen_tf)
+            tf_choice = st.session_state.screen_chart_tf
         
-        if tf_choice == "5分足":
-            s_pd_opts, s_pd_idx = ["1日", "2日", "4日", "5日"], 0
-        elif tf_choice == "日足":
-            s_pd_opts, s_pd_idx = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"], 1
-        elif tf_choice == "週足":
-            s_pd_opts, s_pd_idx = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"], 2
-        elif tf_choice == "月足":
-            s_pd_opts, s_pd_idx = ["1年", "2年", "5年", "10年", "最大"], 2
-
+        if tf_choice == "5分足": s_pd_opts = ["1日", "2日", "4日", "5日"]
+        elif tf_choice == "日足": s_pd_opts = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"]
+        elif tf_choice == "週足": s_pd_opts = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"]
+        elif tf_choice == "月足": s_pd_opts = ["1年", "2年", "5年", "10年", "最大"]
+        
         with c_pd:
-            period_choice = st.radio("⏱️ 表示期間", s_pd_opts, index=s_pd_idx, horizontal=True, key="screen_chart_pd")
+            current_pd = st.session_state.screen_chart_pd if st.session_state.screen_chart_pd in s_pd_opts else s_pd_opts[0]
+            st.radio("⏱️ 表示期間", s_pd_opts, 
+                     index=s_pd_opts.index(current_pd), 
+                     horizontal=True, key="screen_chart_pd_temp", on_change=update_screen_pd)
+            period_choice = st.session_state.screen_chart_pd
         
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="1y")
         if not df_daily.empty:
@@ -712,21 +733,36 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
+    # 🔄 【修正】ポートフォリオ側のチャート設定も即時反映
+    def update_port_tf():
+        tf = st.session_state.port_chart_tf_temp
+        st.session_state.port_chart_tf = tf
+        if tf == "5分足": st.session_state.port_chart_pd = "1日"
+        elif tf == "日足": st.session_state.port_chart_pd = "3ヶ月"
+        elif tf == "週足": st.session_state.port_chart_pd = "1年"
+        elif tf == "月足": st.session_state.port_chart_pd = "5年"
+        
+    def update_port_pd():
+        st.session_state.port_chart_pd = st.session_state.port_chart_pd_temp
+
     c_tf_p, c_pd_p = st.columns(2)
     with c_tf_p:
-        port_tf_choice = st.radio("📊 全チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="port_chart_tf")
+        st.radio("📊 全チャート足種", ["5分足", "日足", "週足", "月足"], 
+                 index=["5分足", "日足", "週足", "月足"].index(st.session_state.port_chart_tf), 
+                 horizontal=True, key="port_chart_tf_temp", on_change=update_port_tf)
+        port_tf_choice = st.session_state.port_chart_tf
         
-    if port_tf_choice == "5分足":
-        p_pd_opts, p_pd_idx = ["1日", "2日", "4日", "5日"], 0
-    elif port_tf_choice == "日足":
-        p_pd_opts, p_pd_idx = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"], 1
-    elif port_tf_choice == "週足":
-        p_pd_opts, p_pd_idx = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"], 2
-    elif port_tf_choice == "月足":
-        p_pd_opts, p_pd_idx = ["1年", "2年", "5年", "10年", "最大"], 2
+    if port_tf_choice == "5分足": p_pd_opts = ["1日", "2日", "4日", "5日"]
+    elif port_tf_choice == "日足": p_pd_opts = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"]
+    elif port_tf_choice == "週足": p_pd_opts = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"]
+    elif port_tf_choice == "月足": p_pd_opts = ["1年", "2年", "5年", "10年", "最大"]
 
     with c_pd_p:
-        port_period_choice = st.radio("⏱️ 全チャート表示期間", p_pd_opts, index=p_pd_idx, horizontal=True, key="port_chart_pd")
+        current_pd_p = st.session_state.port_chart_pd if st.session_state.port_chart_pd in p_pd_opts else p_pd_opts[0]
+        st.radio("⏱️ 全チャート表示期間", p_pd_opts, 
+                 index=p_pd_opts.index(current_pd_p), 
+                 horizontal=True, key="port_chart_pd_temp", on_change=update_port_pd)
+        port_period_choice = st.session_state.port_chart_pd
     
     if st.button("🔄 最新の状況をチェックする", type="primary"):
         st.session_state.show_portfolio_charts = True
