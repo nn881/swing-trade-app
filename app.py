@@ -89,12 +89,14 @@ def check_rights_date_warning():
         return "⚠️ 【権利落ち日 接近アラート】まもなく月末の配当・優待権利落ち日が到来します。権利落ちによる株価の急落リスクにご注意ください。"
     return None
 
-# 📊 【新機能】足種と表示期間（X軸範囲）を独立して取得するよう改良
+# 📊 【改良】選択された期間と足種に基づいたデータ取得
 def get_chart_data(code, tf_choice, period_choice):
-    yf_period = {
+    yf_period_map = {
+        "1日": "1d", "2日": "2d", "4日": "4d", "5日": "5d",
         "1ヶ月": "1mo", "3ヶ月": "3mo", "6ヶ月": "6mo",
-        "1年": "1y", "2年": "2y", "5年": "5y", "10年": "10y"
-    }.get(period_choice, "1y")
+        "1年": "1y", "2年": "2y", "5年": "5y", "10年": "10y", "最大": "max"
+    }
+    yf_period = yf_period_map.get(period_choice, "1y")
 
     if tf_choice == "週足":
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="1wk")
@@ -103,8 +105,8 @@ def get_chart_data(code, tf_choice, period_choice):
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="1mo")
         return df, 12, 24, "12ヶ月線", "24ヶ月線"
     elif tf_choice == "5分足":
-        # 5分足はyfinanceの仕様で最大60日までしか取得できないための安全処理
-        if period_choice in ["3ヶ月", "6ヶ月", "1年", "2年", "5年", "10年"]:
+        # yfinanceの5分足取得は最大60日間の制限があるため、超えた場合はクリップ
+        if yf_period in ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"]:
             yf_period = "60d"
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="5m")
         if not df.empty and df.index.tz is not None:
@@ -114,12 +116,15 @@ def get_chart_data(code, tf_choice, period_choice):
         df = yf.Ticker(code + ".T").history(period=yf_period, interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
+# 📊 【大改修】X軸の目盛りを各足種に最適な間隔へ固定設定
 def apply_xaxis_formatting(fig, df, tf_choice):
     if df.empty: return
     fig.update_layout(xaxis_rangeslider_visible=False)
+    
     if tf_choice == "5分足":
         fig.update_xaxes(
-            dtick=300000, tickformat="%H:%M", tickangle=-45,
+            dtick=3600000, # 1時間ごと（ミリ秒指定：60 * 60 * 1000 = 3,600,000）
+            tickformat="%H:%M", tickangle=-45,
             rangebreaks=[
                 dict(bounds=["sat", "mon"]),
                 dict(bounds=[15, 9], pattern="hour"),
@@ -127,23 +132,32 @@ def apply_xaxis_formatting(fig, df, tf_choice):
             ]
         )
     elif tf_choice == "日足":
-        fig.update_xaxes(dtick="86400000", tickformat="%m/%d", rangebreaks=[dict(bounds=["sat", "mon"])])
+        fig.update_xaxes(
+            dtick="M1", # 1ヶ月ごと
+            tickformat="%Y-%m", tickangle=-45,
+            rangebreaks=[dict(bounds=["sat", "mon"])]
+        )
     elif tf_choice == "週足":
-        fig.update_xaxes(dtick="604800000", tickformat="%Y-%m-%d")
+        fig.update_xaxes(
+            dtick="M3", # 3ヶ月ごと
+            tickformat="%Y-%m", tickangle=-45
+        )
     elif tf_choice == "月足":
-        fig.update_xaxes(dtick="M1", tickformat="%Y-%m")
+        fig.update_xaxes(
+            dtick="M12", # 1年ごと
+            tickformat="%Y", tickangle=0
+        )
 
 @st.cache_data(ttl=1800)
 def get_trend_stocks(ranking_type="up_rate"):
     urls = {
-        "up_rate": "https://finance.yahoo.co.jp/ranking/up?opt=1",
-        "vol_surge": "https://finance.yahoo.co.jp/ranking/volume?opt=1",
-        "high_update": "https://finance.yahoo.co.jp/ranking/high?opt=1"
+        "up_rate": "https://kabutan.jp/warning/?mode=2_1",
+        "vol_surge": "https://kabutan.jp/warning/?mode=3_1",
+        "high_update": "https://kabutan.jp/warning/?mode=4_1"
     }
     url = urls.get(ranking_type, urls["up_rate"])
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'ja-JP,ja;q=0.9'
     }
     
     codes_and_names = []
@@ -151,30 +165,23 @@ def get_trend_stocks(ranking_type="up_rate"):
         res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        for a_tag in soup.find_all('a', href=re.compile(r'/quote/[0-9A-Za-z]{4}\.T')):
-            href = a_tag.get('href')
-            code_match = re.search(r'/quote/([0-9A-Za-z]{4})\.T', href, re.IGNORECASE)
-            if code_match:
-                code = code_match.group(1).upper()
-                name = a_tag.get_text(strip=True)
-                
-                if not name or name == code:
-                    tr = a_tag.find_parent('tr')
-                    if tr:
-                        other_as = tr.find_all('a')
-                        for oa in other_as:
-                            txt = oa.get_text(strip=True)
-                            if txt and txt != code:
-                                name = txt
+        tables = soup.find_all('table', class_='stock_table')
+        if tables:
+            for tr in tables[0].find_all('tr')[1:]:
+                tds = tr.find_all('td')
+                if len(tds) >= 2:
+                    code_a = tds[0].find('a')
+                    if code_a:
+                        code = code_a.text.strip().upper()
+                        if re.match(r'^[0-9A-Z]{4}$', code):
+                            name_a = tds[1].find('a')
+                            name = name_a.text.strip() if name_a else f"銘柄({code})"
+                            if code not in [item['code'] for item in codes_and_names]:
+                                codes_and_names.append({"code": code, "name": name})
+                            if len(codes_and_names) >= 50:
                                 break
-                if not name or name == code:
-                    name = f"銘柄({code})"
-                    
-                if code not in [item['code'] for item in codes_and_names]:
-                    codes_and_names.append({"code": code, "name": name})
-                if len(codes_and_names) >= 50: break
     except Exception as e:
-        print(f"Scraping error: {e}")
+        print(f"Scraping error (Kabutan): {e}")
     return codes_and_names
 
 @st.cache_data(ttl=86400)
@@ -388,7 +395,7 @@ if app_page == "🔍 銘柄スクリーニング":
     st.markdown("---")
     
     if search_mode == "🔥 今日のトレンド株を発掘 (ランキング連携)":
-        st.write("Yahoo!ファイナンスのランキングから、今市場で注目されている上位銘柄（IPO含む全銘柄対象）を自動で引っ張ってきて、スコアリングにかけます。")
+        st.write("株探（Kabutan）のデータベースから、今市場で最も注目されている上位銘柄を自動で引っ張ってきて、スコアリングにかけます。")
         col1, col2, col3 = st.columns(3)
         ranking_choice = "up_rate"
         
@@ -396,10 +403,10 @@ if app_page == "🔍 銘柄スクリーニング":
             if st.button("📈 値上がり率 トップ50", use_container_width=True):
                 ranking_choice, run_analysis = "up_rate", True
         with col2:
-            if st.button("📊 出来高上位 トップ50", use_container_width=True):
+            if st.button("📊 出来高急増 トップ50", use_container_width=True):
                 ranking_choice, run_analysis = "vol_surge", True
         with col3:
-            if st.button("🚀 年初来高値更新 トップ50", use_container_width=True):
+            if st.button("🚀 新高値更新 トップ50", use_container_width=True):
                 ranking_choice, run_analysis = "high_update", True
                 
         if run_analysis:
@@ -413,7 +420,7 @@ if app_page == "🔍 銘柄スクリーニング":
                     tickers_to_analyze = [{"code": t["code"]+".T", "name": t["name"]} for t in trend_list]
 
     elif search_mode == "🔍 特定の銘柄を深く分析 (フリーワード/コード検索)":
-        st.write("企業名または証券コード（例: 627A）を入力してください。IPO・新コードにも対応しています。")
+        st.write("企業名または証券コードを入力してください。IPO・新コードにも対応しています。")
         search_query = st.text_input("企業名 または 証券コード (4桁)", placeholder="例: 627A, 7974, 任天堂")
         
         if st.button("🔍 分析開始", type="primary") and search_query:
@@ -527,14 +534,23 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        # 📈 【新機能】足種と表示期間を独立して切り替えられるUI
+        # 📈 【大改修】足種に応じて期間の選択肢とデフォルト値を動的に切り替え
         c_tf, c_pd = st.columns(2)
         with c_tf:
             tf_choice = st.radio("📊 チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="screen_chart_tf")
-        with c_pd:
-            period_choice = st.radio("⏱️ 表示期間", ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年", "5年", "10年"], index=3, horizontal=True, key="screen_chart_pd")
         
-        # 利確・損切のベース値計算のため、ここは常に日足1年分で固定取得
+        if tf_choice == "5分足":
+            s_pd_opts, s_pd_idx = ["1日", "2日", "4日", "5日"], 0  # デフォルト: その日のみ(1日)
+        elif tf_choice == "日足":
+            s_pd_opts, s_pd_idx = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"], 1  # デフォルト: 3ヶ月
+        elif tf_choice == "週足":
+            s_pd_opts, s_pd_idx = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"], 2  # デフォルト: 1年
+        elif tf_choice == "月足":
+            s_pd_opts, s_pd_idx = ["1年", "2年", "5年", "10年", "最大"], 2  # デフォルト: 5年
+
+        with c_pd:
+            period_choice = st.radio("⏱️ 表示期間", s_pd_opts, index=s_pd_idx, horizontal=True, key="screen_chart_pd")
+        
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="1y")
         if not df_daily.empty:
             tr = pd.concat([df_daily['High'] - df_daily['Low'], abs(df_daily['High'] - df_daily['Close'].shift()), abs(df_daily['Low'] - df_daily['Close'].shift())], axis=1).max(axis=1)
@@ -554,10 +570,8 @@ if app_page == "🔍 銘柄スクリーニング":
                 df_c['MA_S'] = df_c['Close'].rolling(min(ma_s, len(df_c))).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(min(ma_l, len(df_c))).mean()
                 
-                # 📈 【大改修】出来高（Volume）を独立表示するため 4段構成 に変更
                 fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2])
                 
-                # Row 1: ローソク足
                 fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
@@ -579,18 +593,15 @@ if app_page == "🔍 銘柄スクリーニング":
                 fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
                 fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[stop_loss, stop_loss], mode='lines', name='損切ライン', line=dict(color='red', dash='dot')), row=1, col=1)
 
-                # 📊 【新機能】Row 2: 出来高 (Volume) 色分け表示
                 vol_colors = ['#ef5350' if row['Open'] > row['Close'] else '#26a69a' for index, row in df_c.iterrows()]
                 fig.add_trace(go.Bar(x=df_c.index, y=df_c['Volume'], marker_color=vol_colors, name='出来高'), row=2, col=1)
 
-                # Row 3: MACD
                 macd = df_c['Close'].ewm(span=12, adjust=False).mean() - df_c['Close'].ewm(span=26, adjust=False).mean()
                 sig = macd.ewm(span=9, adjust=False).mean()
                 fig.add_trace(go.Bar(x=df_c.index, y=macd-sig, name='MACD Hist', marker_color='gray'), row=3, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=3, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=3, col=1)
 
-                # Row 4: RSI
                 delta = df_c['Close'].diff()
                 rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
                 if len(rsi_series := 100 - (100 / (1 + rs))) > 0:
@@ -598,7 +609,6 @@ if app_page == "🔍 銘柄スクリーニング":
                     fig.add_hline(y=70, line_dash="dash", line_color="red", row=4, col=1)
                     fig.add_hline(y=30, line_dash="dash", line_color="green", row=4, col=1)
 
-                # 🚀 【新機能】hovermode="x unified"で全データを串刺しホバー表示
                 fig.update_layout(
                     height=800, 
                     template="plotly_dark", 
@@ -666,11 +676,22 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
+    # 📈 【大改修】ポートフォリオ側も同様に動的に切り替え
     c_tf_p, c_pd_p = st.columns(2)
     with c_tf_p:
         port_tf_choice = st.radio("📊 全チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="port_chart_tf")
+        
+    if port_tf_choice == "5分足":
+        p_pd_opts, p_pd_idx = ["1日", "2日", "4日", "5日"], 0
+    elif port_tf_choice == "日足":
+        p_pd_opts, p_pd_idx = ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年"], 1
+    elif port_tf_choice == "週足":
+        p_pd_opts, p_pd_idx = ["3ヶ月", "6ヶ月", "1年", "2年", "5年"], 2
+    elif port_tf_choice == "月足":
+        p_pd_opts, p_pd_idx = ["1年", "2年", "5年", "10年", "最大"], 2
+
     with c_pd_p:
-        port_period_choice = st.radio("⏱️ 全チャート表示期間", ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年", "5年", "10年"], index=3, horizontal=True, key="port_chart_pd")
+        port_period_choice = st.radio("⏱️ 全チャート表示期間", p_pd_opts, index=p_pd_idx, horizontal=True, key="port_chart_pd")
     
     if st.button("🔄 最新の状況をチェックする", type="primary"):
         st.session_state.show_portfolio_charts = True
@@ -736,7 +757,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     df_p['MA_S'] = df_p['Close'].rolling(min(ma_s, len(df_p))).mean()
                     df_p['MA_L'] = df_p['Close'].rolling(min(ma_l, len(df_p))).mean()
                     
-                    # 📈 ポートフォリオ側も出来高を含めた4段プロフェッショナル仕様に統一
                     fig_p = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2])
                     
                     fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'), row=1, col=1)
@@ -753,18 +773,15 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                         fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right", row=1, col=1)
                         fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right", row=1, col=1)
 
-                    # Row 2: 出来高
                     vol_colors_p = ['#ef5350' if row['Open'] > row['Close'] else '#26a69a' for index, row in df_p.iterrows()]
                     fig_p.add_trace(go.Bar(x=df_p.index, y=df_p['Volume'], marker_color=vol_colors_p, name='出来高'), row=2, col=1)
 
-                    # Row 3: MACD
                     macd_p = df_p['Close'].ewm(span=12, adjust=False).mean() - df_p['Close'].ewm(span=26, adjust=False).mean()
                     sig_p = macd_p.ewm(span=9, adjust=False).mean()
                     fig_p.add_trace(go.Bar(x=df_p.index, y=macd_p-sig_p, name='MACD Hist', marker_color='gray'), row=3, col=1)
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=macd_p, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=3, col=1)
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=sig_p, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=3, col=1)
 
-                    # Row 4: RSI
                     delta_p = df_p['Close'].diff()
                     rs_p = (delta_p.where(delta_p > 0, 0)).rolling(14).mean() / (-delta_p.where(delta_p < 0, 0)).rolling(14).mean()
                     if len(rsi_series_p := 100 - (100 / (1 + rs_p))) > 0:
