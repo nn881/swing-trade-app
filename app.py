@@ -10,7 +10,7 @@ import re
 import os
 from datetime import datetime, timedelta
 import urllib.parse
-import concurrent.futures # 🚀 新たに並列処理ライブラリを追加
+import concurrent.futures
 
 st.set_page_config(page_title="スイング監視", layout="wide")
 
@@ -158,16 +158,15 @@ def apply_axis_formatting(fig, df, tf_choice, tp=None, sl=None):
         cols_min = ['Low']
         if 'BB_upper' in df.columns: cols_max.append('BB_upper')
         if 'BB_lower' in df.columns: cols_min.append('BB_lower')
-        # 🛡️ 抵抗線もMAX値の計算に含める
         if 'Resistance' in df.columns: cols_max.append('Resistance')
         
-        y_max = df[cols_max].max().max()
-        y_min = df[cols_min].min().min()
-        
-        if tp is not None and tp > y_max: y_max = tp
-        if sl is not None and sl < y_min: y_min = sl
+        # 修正ポイント: 利確・損切(tp, sl)を範囲計算から完全に除外
+        y_max = df[cols_max].max(skipna=True).max()
+        y_min = df[cols_min].min(skipna=True).min()
             
-        margin = (y_max - y_min) * 0.05 
+        # 修正ポイント: 上下余白を10%に設定して綺麗に収める
+        margin = (y_max - y_min) * 0.1 
+        if margin == 0: margin = y_max * 0.05
         
         if pd.notna(y_max) and pd.notna(y_min):
             dtick_val = 20 if tf_choice == "5分足" else 200
@@ -179,7 +178,6 @@ def apply_axis_formatting(fig, df, tf_choice, tp=None, sl=None):
     except Exception as e:
         pass
 
-# 🚀 【大改修】外部サイトのスクレイピングを廃止し、自前の計算エンジンを実装！
 def fetch_single_stock_summary(code):
     try:
         df = yf.Ticker(code + ".T").history(period="5d")
@@ -197,14 +195,12 @@ def fetch_single_stock_summary(code):
     except: pass
     return None
 
-@st.cache_data(ttl=900) # 15分ごとに更新
+@st.cache_data(ttl=900)
 def get_internal_trend_stocks(ranking_type, manual_tickers_str=""):
-    # 主要銘柄＋ユーザーが登録した全銘柄を対象にする
     manual_codes = [c.strip().upper() for c in manual_tickers_str.split('\n') if re.match(r'^[0-9A-Z]{4}$', c.strip().upper())]
     all_codes = list(dict.fromkeys(TARGET_STOCKS + manual_codes))
     
     results = []
-    # 並列処理で一気にデータを取得（スクレイピングではないのでブロックされない）
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         futures = {executor.submit(fetch_single_stock_summary, code): code for code in all_codes}
         for future in concurrent.futures.as_completed(futures):
@@ -606,7 +602,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 df_c['MA_S'] = df_c['Close'].rolling(min(ma_s, len(df_c))).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(min(ma_l, len(df_c))).mean()
                 
-                # 📈 【新機能】抵抗線（直近高値）の計算
                 res_period = 60 if tf_choice in ["日足", "5分足"] else (26 if tf_choice == "週足" else 12)
                 df_c['Resistance'] = df_c['High'].rolling(min(res_period, len(df_c))).max()
                 
@@ -615,8 +610,6 @@ if app_page == "🔍 銘柄スクリーニング":
                 fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
-                
-                # 📈 【描画】上値抵抗線（ピンク点線）
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['Resistance'], mode='lines', name='上値抵抗線', line=dict(color='pink', width=1.5, dash='dash')), row=1, col=1)
                 
                 if tf_choice in ["日足", "5分足"]:
@@ -799,7 +792,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     df_p['MA_S'] = df_p['Close'].rolling(min(ma_s, len(df_p))).mean()
                     df_p['MA_L'] = df_p['Close'].rolling(min(ma_l, len(df_p))).mean()
                     
-                    # 📈 抵抗線計算
                     res_period = 60 if port_tf_choice in ["日足", "5分足"] else (26 if port_tf_choice == "週足" else 12)
                     df_p['Resistance'] = df_p['High'].rolling(min(res_period, len(df_p))).max()
                     
@@ -808,8 +800,6 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                     fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'), row=1, col=1)
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
-                    
-                    # 📈 抵抗線描画
                     fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['Resistance'], mode='lines', name='上値抵抗線', line=dict(color='pink', width=1.5, dash='dash')), row=1, col=1)
                     
                     if port_tf_choice in ["日足", "5分足"]:
