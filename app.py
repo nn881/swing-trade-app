@@ -89,60 +89,49 @@ def check_rights_date_warning():
         return "⚠️ 【権利落ち日 接近アラート】まもなく月末の配当・優待権利落ち日が到来します。権利落ちによる株価の急落リスクにご注意ください。"
     return None
 
-def get_chart_data(code, tf_choice):
+# 📊 【新機能】足種と表示期間（X軸範囲）を独立して取得するよう改良
+def get_chart_data(code, tf_choice, period_choice):
+    yf_period = {
+        "1ヶ月": "1mo", "3ヶ月": "3mo", "6ヶ月": "6mo",
+        "1年": "1y", "2年": "2y", "5年": "5y", "10年": "10y"
+    }.get(period_choice, "1y")
+
     if tf_choice == "週足":
-        df = yf.Ticker(code + ".T").history(period="2y", interval="1wk")
+        df = yf.Ticker(code + ".T").history(period=yf_period, interval="1wk")
         return df, 13, 26, "13週線", "26週線"
     elif tf_choice == "月足":
-        df = yf.Ticker(code + ".T").history(period="5y", interval="1mo")
+        df = yf.Ticker(code + ".T").history(period=yf_period, interval="1mo")
         return df, 12, 24, "12ヶ月線", "24ヶ月線"
     elif tf_choice == "5分足":
-        df = yf.Ticker(code + ".T").history(period="1mo", interval="5m")
-        # indexがタイムゾーン情報を持っている場合、扱いやすくするためTZを消去してローカル時間にする
+        # 5分足はyfinanceの仕様で最大60日までしか取得できないための安全処理
+        if period_choice in ["3ヶ月", "6ヶ月", "1年", "2年", "5年", "10年"]:
+            yf_period = "60d"
+        df = yf.Ticker(code + ".T").history(period=yf_period, interval="5m")
         if not df.empty and df.index.tz is not None:
             df.index = df.index.tz_convert('Asia/Tokyo').tz_localize(None)
         return df, 25, 75, "25本線", "75本線"
     else:
-        df = yf.Ticker(code + ".T").history(period="6mo", interval="1d")
+        df = yf.Ticker(code + ".T").history(period=yf_period, interval="1d")
         return df, 5, 25, "5日線", "25日線"
 
-# 📊 【新機能】X軸の表示形式を足種に合わせて最適化し、空白時間（夜間など）を詰める関数
 def apply_xaxis_formatting(fig, df, tf_choice):
     if df.empty: return
-    
-    # 共通設定：スライダー非表示
     fig.update_layout(xaxis_rangeslider_visible=False)
-
     if tf_choice == "5分足":
-        # 5分ごとの目盛りに設定
         fig.update_xaxes(
-            dtick=300000, # ミリ秒表記：5分 = 300,000ms
-            tickformat="%H:%M",
-            tickangle=-45,
-            # 夜間（15:00〜翌9:00）や昼休み、土日の空白を自動で詰める
+            dtick=300000, tickformat="%H:%M", tickangle=-45,
             rangebreaks=[
-                dict(bounds=["sat", "mon"]), # 土日カット
-                dict(bounds=[15, 9], pattern="hour"), # 15時から翌9時カット
-                dict(bounds=[11.5, 12.5], pattern="hour") # 11時半から12時半カット（昼休み）
+                dict(bounds=["sat", "mon"]),
+                dict(bounds=[15, 9], pattern="hour"),
+                dict(bounds=[11.5, 12.5], pattern="hour")
             ]
         )
     elif tf_choice == "日足":
-        fig.update_xaxes(
-            dtick="86400000", # 1日ごと
-            tickformat="%m/%d",
-            rangebreaks=[dict(bounds=["sat", "mon"])]
-        )
+        fig.update_xaxes(dtick="86400000", tickformat="%m/%d", rangebreaks=[dict(bounds=["sat", "mon"])])
     elif tf_choice == "週足":
-        fig.update_xaxes(
-            dtick="604800000", # 1週間ごと
-            tickformat="%Y-%m-%d"
-        )
+        fig.update_xaxes(dtick="604800000", tickformat="%Y-%m-%d")
     elif tf_choice == "月足":
-        fig.update_xaxes(
-            dtick="M1", # 1ヶ月ごと
-            tickformat="%Y-%m"
-        )
-
+        fig.update_xaxes(dtick="M1", tickformat="%Y-%m")
 
 @st.cache_data(ttl=1800)
 def get_trend_stocks(ranking_type="up_rate"):
@@ -538,8 +527,14 @@ if app_page == "🔍 銘柄スクリーニング":
         col_btn1.link_button(f"🛒 楽天証券で確認・発注する", rakuten_url, type="primary", use_container_width=True)
         col_btn2.link_button(f"🔗 Yahoo!で信用倍率を見る", yahoo_url, use_container_width=True)
         
-        tf_choice = st.radio("チャート表示（足種切り替え）", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="screen_chart_tf")
+        # 📈 【新機能】足種と表示期間を独立して切り替えられるUI
+        c_tf, c_pd = st.columns(2)
+        with c_tf:
+            tf_choice = st.radio("📊 チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="screen_chart_tf")
+        with c_pd:
+            period_choice = st.radio("⏱️ 表示期間", ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年", "5年", "10年"], index=3, horizontal=True, key="screen_chart_pd")
         
+        # 利確・損切のベース値計算のため、ここは常に日足1年分で固定取得
         df_daily = yf.Ticker(st.session_state.selected_code + ".T").history(period="1y")
         if not df_daily.empty:
             tr = pd.concat([df_daily['High'] - df_daily['Low'], abs(df_daily['High'] - df_daily['Close'].shift()), abs(df_daily['Low'] - df_daily['Close'].shift())], axis=1).max(axis=1)
@@ -553,13 +548,16 @@ if app_page == "🔍 銘柄スクリーニング":
             col2.metric("🎯 利確目標 (日足基準)", f"¥{take_profit:,.1f}")
             col3.metric("✂️ 損切ライン (日足基準)", f"¥{stop_loss:,.1f}")
             
-            df_c, ma_s, ma_l, name_s, name_l = get_chart_data(st.session_state.selected_code, tf_choice)
+            df_c, ma_s, ma_l, name_s, name_l = get_chart_data(st.session_state.selected_code, tf_choice, period_choice)
             
             if not df_c.empty:
                 df_c['MA_S'] = df_c['Close'].rolling(min(ma_s, len(df_c))).mean()
                 df_c['MA_L'] = df_c['Close'].rolling(min(ma_l, len(df_c))).mean()
                 
-                fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
+                # 📈 【大改修】出来高（Volume）を独立表示するため 4段構成 に変更
+                fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2])
+                
+                # Row 1: ローソク足
                 fig.add_trace(go.Candlestick(x=df_c.index, open=df_c['Open'], high=df_c['High'], low=df_c['Low'], close=df_c['Close'], name='ローソク足'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
@@ -572,35 +570,44 @@ if app_page == "🔍 銘柄スクリーニング":
                 df_c['BB_std'] = df_c['Close'].rolling(min(ma_l, len(df_c))).std()
                 df_c['BB_upper'] = df_c['MA_L'] + (df_c['BB_std']*2)
                 df_c['BB_lower'] = df_c['MA_L'] - (df_c['BB_std']*2)
-                
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_upper'], mode='lines', line=dict(width=0), showlegend=False), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_c.index, y=df_c['BB_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(173, 216, 230, 0.1)', name='BB±2σ'), row=1, col=1)
                 
-                if tf_choice == "5分足":
-                    f_date = df_c.index[-1] + timedelta(hours=5)
-                elif tf_choice == "日足":
-                    f_date = df_c.index[-1] + timedelta(days=5)
-                else:
-                    f_date = df_c.index[-1] + timedelta(days=20)
-                    
+                if tf_choice == "5分足": f_date = df_c.index[-1] + timedelta(hours=5)
+                elif tf_choice == "日足": f_date = df_c.index[-1] + timedelta(days=5)
+                else: f_date = df_c.index[-1] + timedelta(days=20)
                 fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[take_profit, take_profit], mode='lines', name='利確目安', line=dict(color='lightgreen', dash='dot')), row=1, col=1)
                 fig.add_trace(go.Scatter(x=[df_c.index[-1], f_date], y=[stop_loss, stop_loss], mode='lines', name='損切ライン', line=dict(color='red', dash='dot')), row=1, col=1)
 
+                # 📊 【新機能】Row 2: 出来高 (Volume) 色分け表示
+                vol_colors = ['#ef5350' if row['Open'] > row['Close'] else '#26a69a' for index, row in df_c.iterrows()]
+                fig.add_trace(go.Bar(x=df_c.index, y=df_c['Volume'], marker_color=vol_colors, name='出来高'), row=2, col=1)
+
+                # Row 3: MACD
                 macd = df_c['Close'].ewm(span=12, adjust=False).mean() - df_c['Close'].ewm(span=26, adjust=False).mean()
                 sig = macd.ewm(span=9, adjust=False).mean()
-                fig.add_trace(go.Bar(x=df_c.index, y=macd-sig, name='MACD Hist', marker_color='gray'), row=2, col=1)
-                fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=2, col=1)
-                fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=2, col=1)
+                fig.add_trace(go.Bar(x=df_c.index, y=macd-sig, name='MACD Hist', marker_color='gray'), row=3, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=macd, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=df_c.index, y=sig, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=3, col=1)
 
+                # Row 4: RSI
                 delta = df_c['Close'].diff()
                 rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
                 if len(rsi_series := 100 - (100 / (1 + rs))) > 0:
-                    fig.add_trace(go.Scatter(x=df_c.index, y=rsi_series, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=3, col=1)
-                    fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-                    fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+                    fig.add_trace(go.Scatter(x=df_c.index, y=rsi_series, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=4, col=1)
+                    fig.add_hline(y=70, line_dash="dash", line_color="red", row=4, col=1)
+                    fig.add_hline(y=30, line_dash="dash", line_color="green", row=4, col=1)
 
-                fig.update_layout(height=650, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
-                # 📈 【追加】X軸の表示最適化処理を適用
+                # 🚀 【新機能】hovermode="x unified"で全データを串刺しホバー表示
+                fig.update_layout(
+                    height=800, 
+                    template="plotly_dark", 
+                    dragmode="pan", 
+                    margin=dict(l=10, r=10, t=10, b=10), 
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+                    hovermode="x unified"
+                )
+                
                 apply_xaxis_formatting(fig, df_c, tf_choice)
                 
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
@@ -659,7 +666,11 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
     st.markdown("---")
     dash_placeholder = st.empty()
     
-    port_tf_choice = st.radio("全チャートの表示期間を一括切り替え", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="port_chart_tf")
+    c_tf_p, c_pd_p = st.columns(2)
+    with c_tf_p:
+        port_tf_choice = st.radio("📊 全チャート足種", ["5分足", "日足", "週足", "月足"], index=1, horizontal=True, key="port_chart_tf")
+    with c_pd_p:
+        port_period_choice = st.radio("⏱️ 全チャート表示期間", ["1ヶ月", "3ヶ月", "6ヶ月", "1年", "2年", "5年", "10年"], index=3, horizontal=True, key="port_chart_pd")
     
     if st.button("🔄 最新の状況をチェックする", type="primary"):
         st.session_state.show_portfolio_charts = True
@@ -682,7 +693,7 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
             st.markdown(f"### {code} {name}")
             
             try:
-                df_daily_p = yf.Ticker(code + ".T").history(period="6mo")
+                df_daily_p = yf.Ticker(code + ".T").history(period="1y")
                 if df_daily_p.empty:
                     st.error(f"⚠️ {code}のデータが取得できませんでした（IPOなど）。")
                     rak_url = f"https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric={code}.t"
@@ -719,30 +730,58 @@ elif app_page == "💼 保有銘柄ポートフォリオ":
                 if memo_txt and memo_txt.lower() not in ['nan', 'none']:
                     st.caption(f"📝 メモ: {memo_txt}")
                 
-                df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice)
+                df_p, ma_s, ma_l, name_s, name_l = get_chart_data(code, port_tf_choice, port_period_choice)
                 
                 if not df_p.empty:
                     df_p['MA_S'] = df_p['Close'].rolling(min(ma_s, len(df_p))).mean()
                     df_p['MA_L'] = df_p['Close'].rolling(min(ma_l, len(df_p))).mean()
-                    fig_p = go.Figure()
-                    fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'))
-                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)))
-                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)))
+                    
+                    # 📈 ポートフォリオ側も出来高を含めた4段プロフェッショナル仕様に統一
+                    fig_p = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2])
+                    
+                    fig_p.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='ローソク足'), row=1, col=1)
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_S'], mode='lines', name=name_s, line=dict(color='lime', width=1)), row=1, col=1)
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_L'], mode='lines', name=name_l, line=dict(color='orange', width=1.5)), row=1, col=1)
                     
                     if port_tf_choice in ["日足", "5分足"]:
                         ma_75_name = "75日線" if port_tf_choice == "日足" else "75本線"
                         df_p['MA_75'] = df_p['Close'].rolling(min(75, len(df_p))).mean()
-                        fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_75'], mode='lines', name=ma_75_name, line=dict(color='#ab63fa', width=1, dash='dot')))
+                        fig_p.add_trace(go.Scatter(x=df_p.index, y=df_p['MA_75'], mode='lines', name=ma_75_name, line=dict(color='#ab63fa', width=1, dash='dot')), row=1, col=1)
                     
                     if entry_price > 0:
-                        fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left")
-                        fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right")
-                        fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right")
+                        fig_p.add_hline(y=entry_price, line_dash="solid", line_color="white", annotation_text="取得単価", annotation_position="top left", row=1, col=1)
+                        fig_p.add_hline(y=take_profit, line_dash="dot", line_color="lightgreen", annotation_text="利確目標", annotation_position="top right", row=1, col=1)
+                        fig_p.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="損切ライン", annotation_position="bottom right", row=1, col=1)
 
-                    fig_p.update_layout(height=400, template="plotly_dark", dragmode="pan", margin=dict(l=10, r=10, t=10, b=10))
-                    # 📈 【追加】ポートフォリオ側のチャートにもX軸最適化を適用
-                    apply_xaxis_formatting(fig_p, df_p, port_tf_choice)
+                    # Row 2: 出来高
+                    vol_colors_p = ['#ef5350' if row['Open'] > row['Close'] else '#26a69a' for index, row in df_p.iterrows()]
+                    fig_p.add_trace(go.Bar(x=df_p.index, y=df_p['Volume'], marker_color=vol_colors_p, name='出来高'), row=2, col=1)
+
+                    # Row 3: MACD
+                    macd_p = df_p['Close'].ewm(span=12, adjust=False).mean() - df_p['Close'].ewm(span=26, adjust=False).mean()
+                    sig_p = macd_p.ewm(span=9, adjust=False).mean()
+                    fig_p.add_trace(go.Bar(x=df_p.index, y=macd_p-sig_p, name='MACD Hist', marker_color='gray'), row=3, col=1)
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=macd_p, mode='lines', name='MACD', line=dict(color='cyan', width=1)), row=3, col=1)
+                    fig_p.add_trace(go.Scatter(x=df_p.index, y=sig_p, mode='lines', name='Signal', line=dict(color='magenta', width=1)), row=3, col=1)
+
+                    # Row 4: RSI
+                    delta_p = df_p['Close'].diff()
+                    rs_p = (delta_p.where(delta_p > 0, 0)).rolling(14).mean() / (-delta_p.where(delta_p < 0, 0)).rolling(14).mean()
+                    if len(rsi_series_p := 100 - (100 / (1 + rs_p))) > 0:
+                        fig_p.add_trace(go.Scatter(x=df_p.index, y=rsi_series_p, mode='lines', name='RSI', line=dict(color='yellow', width=1)), row=4, col=1)
+                        fig_p.add_hline(y=70, line_dash="dash", line_color="red", row=4, col=1)
+                        fig_p.add_hline(y=30, line_dash="dash", line_color="green", row=4, col=1)
+
+                    fig_p.update_layout(
+                        height=800, 
+                        template="plotly_dark", 
+                        dragmode="pan", 
+                        margin=dict(l=10, r=10, t=10, b=10), 
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+                        hovermode="x unified"
+                    )
                     
+                    apply_xaxis_formatting(fig_p, df_p, port_tf_choice)
                     st.plotly_chart(fig_p, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
                 
                 st.markdown("---")
